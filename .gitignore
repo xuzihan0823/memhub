@@ -3,3 +3,5 @@ node_modules/
 *.log
 .memhub-tmp/
 coverage/
+build/
+dist/

@@ -10,13 +10,24 @@ const MAX_FILES = 2000;
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
 
-// In-process queue + cross-process atomic lock file (.memhub.lock)
-const writeQueues = new Map();
+// In-process queue + cross-process atomic lock file
+const lockQueues = new Map();
 const LOCK_STALE_MS = 15000;
 
-async function acquireProcessLock(scopeRoot, timeoutMs = 5000) {
+function ownerAlive(lockPath) {
+  try {
+    const { pid } = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    if (!Number.isInteger(pid) || pid === process.pid) return true;
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+async function acquireProcessLock(scopeRoot, { name = '.memhub.lock', timeoutMs = 5000, staleMs = LOCK_STALE_MS } = {}) {
   await fsp.mkdir(scopeRoot, { recursive: true });
-  const lockPath = path.join(scopeRoot, '.memhub.lock');
+  const lockPath = path.join(scopeRoot, name);
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try {
@@ -30,7 +41,7 @@ async function acquireProcessLock(scopeRoot, timeoutMs = 5000) {
       if (err.code !== 'EEXIST') throw err;
       try {
         const st = await fsp.stat(lockPath);
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+        if (Date.now() - st.mtimeMs > staleMs || (Date.now() - st.mtimeMs > 1000 && !ownerAlive(lockPath))) {
           await fsp.unlink(lockPath).catch(() => {});
           continue;
         }
@@ -45,26 +56,30 @@ async function acquireProcessLock(scopeRoot, timeoutMs = 5000) {
   }
 }
 
-function enqueueWrite(scopeRoot, fn) {
-  const key = path.resolve(scopeRoot);
-  const prev = writeQueues.get(key) || Promise.resolve();
-  const run = prev.then(async () => {
-    const release = await acquireProcessLock(key);
+function withLock(scopeRoot, fn, options = {}) {
+  const root = path.resolve(scopeRoot);
+  const key = path.join(root, options.name || '.memhub.lock');
+  const prev = lockQueues.get(key) || Promise.resolve();
+  const locked = async () => {
+    const release = await acquireProcessLock(root, options);
     try {
       return await fn();
     } finally {
       await release();
     }
-  }, async () => {
-    const release = await acquireProcessLock(key);
-    try {
-      return await fn();
-    } finally {
-      await release();
-    }
-  });
-  writeQueues.set(key, run.catch(() => {}));
+  };
+  const run = prev.then(locked, locked);
+  lockQueues.set(key, run.catch(() => {}));
   return run;
+}
+
+function enqueueWrite(scopeRoot, fn) {
+  return withLock(scopeRoot, fn);
+}
+
+// Serializes whole read-modify-write store operations; distinct from the per-file write lock so writes inside do not deadlock.
+function withStoreTransaction(lockRoot, fn) {
+  return withLock(lockRoot, fn, { name: '.memhub.txn.lock', timeoutMs: 30000, staleMs: 120000 });
 }
 
 function inside(base, target) {
@@ -240,4 +255,5 @@ module.exports = {
   atomicWriteText,
   safeRemove,
   walkMarkdownFiles,
+  withStoreTransaction,
 };

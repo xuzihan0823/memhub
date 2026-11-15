@@ -688,3 +688,91 @@ test('adapter: pi-desktop injects boot catalog once and retrieves after failing 
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
+
+test('core: concurrent proposals serialize the whole read-modify-write', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    const stores = () => core.resolveStores({ homeDir, globalDir, cwd: repoDir });
+    const handoffs = await Promise.all([1, 2, 3].map(n => core.proposeMemory(stores(), {
+      agent: `a${n}`,
+      items: [{ scope: 'handoff', task: 'feat-x', title: `任务X ${n}`, content: `进度 ${n}` }],
+    })));
+    assert.deepEqual(handoffs.map(r => r.committed[0].action).sort(), ['create', 'update', 'update']);
+
+    const sameTitle = await Promise.all([1, 2].map(n => core.proposeMemory(stores(), {
+      items: [{ scope: 'global', type: 'skill', title: '同名经验', content: `版本 ${n}` }],
+    })));
+    const ids = sameTitle.map(r => r.committed[0].id);
+    assert.notEqual(ids[0], ids[1]);
+
+    const projectLog = await fsp.readFile(path.join(repoDir, '.memory', 'log.md'), 'utf8');
+    assert.equal(projectLog.split('\n').filter(l => l.includes('handoff-')).length, 3);
+    const all = await core.loadAllEntries(stores());
+    assert.equal(all.filter(e => e.scope === 'handoff').length, 1);
+    assert.equal(all.filter(e => e.title === '同名经验' && core.isActiveEntry(e)).length, 1);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('core: frontmatter round-trips hostile and scalar-looking strings', async () => {
+  const { base, homeDir, globalDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: base });
+    const res = await core.proposeMemory(stores, { items: [
+      { scope: 'global', type: 'skill', title: '正常标题', summary: 'x\n---\nstatus: deprecated', content: '正文' },
+      { scope: 'global', type: 'decision', title: '2024', content: '数字标题' },
+      { scope: 'global', type: 'decision', title: 'true', content: '布尔标题' },
+    ] });
+    const entries = await core.loadAllEntries(stores);
+    const byId = id => entries.find(e => e.id === id);
+    const [hostile, year, bool] = res.committed.map(c => byId(c.id));
+    assert.equal(hostile.status, 'active');
+    assert.equal(hostile.summary, 'x --- status: deprecated');
+    assert.equal(hostile.body, '正文');
+    assert.equal(year.title, '2024');
+    assert.equal(bool.title, 'true');
+
+    await fsp.writeFile(path.join(globalDir, 'skills', 'hand.md'), '---\ntitle: 404\n---\n手写');
+    assert.equal((await core.loadAllEntries(stores)).find(e => e.relPath === 'skills/hand.md').title, '404');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('core: rejects secrets and invisible characters before writing', async () => {
+  const { base, homeDir, globalDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: base });
+    const propose = content => core.proposeMemory(stores, { items: [{ scope: 'global', title: '凭据', content }] });
+    await assert.rejects(() => propose('key sk-abcdefghijklmnopqrstuvwxyz123456'), /API Key/);
+    await assert.rejects(() => propose('-----BEGIN OPENSSH PRIVATE KEY-----'), /私钥/);
+    await assert.rejects(() => propose('password = hunter2hunter2hunter2'), /凭据赋值/);
+    await assert.rejects(() => propose('看起来正常\u200b'), /不可见/);
+    await propose('Key 路径：~/.ssh/staging_ed25519，端口 2222');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('search: english terms match on word boundaries, CJK stays substring', () => {
+  const entry = (id, title) => ({ id, title, summary: '', body: '', keywords: [], triggers: [], status: 'active', salience: 2, scope: 'global' });
+  const entries = [entry('noise', 'Rapid prototyping with Goodreads'), entry('real', 'Go API 网关 rate-limit')];
+  assert.deepEqual(core.searchEntries(entries, 'go api', { strict: true }).map(h => h.entry.id), ['real']);
+  assert.deepEqual(core.searchEntries(entries, 'limit', {}).map(h => h.entry.id), ['real']);
+  assert.deepEqual(core.searchEntries(entries, '网关配置', {}).map(h => h.entry.id), ['real']);
+});
+
+test('core: archiving a global handoff keeps the global index title', async () => {
+  const { base, homeDir, globalDir } = await makeTempWorkspace();
+  try {
+    const outside = path.join(homeDir, 'Desktop', 'plan');
+    await fsp.mkdir(outside, { recursive: true });
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: outside });
+    const res = await core.proposeMemory(stores, { items: [{ scope: 'handoff', task: 't', title: '临时任务', content: '- [ ] a' }] });
+    await core.forgetEntry(stores, { id: res.committed[0].id, mode: 'archive' });
+    assert.match(await fsp.readFile(path.join(globalDir, 'index.md'), 'utf8'), /^# 全局记忆路由表/);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});

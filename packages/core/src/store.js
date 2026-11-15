@@ -33,6 +33,7 @@ const {
   atomicWriteText,
   safeRemove,
   walkMarkdownFiles,
+  withStoreTransaction,
 } = require('./fs-safe');
 
 const GLOBAL_CONTENT_DIRS = ['user', 'skills', 'decisions', 'projects', 'concepts', 'handoffs'];
@@ -292,15 +293,17 @@ async function bootContext(stores, { maxSoulChars = 1500, archiveExpired = true,
   let entries = await loadAllEntries(stores);
   const archivedHandoffs = [];
   if (archiveExpired) {
-    const expired = entries.filter(e => e.scope === 'handoff' && !e.readOnly && isHandoffExpired(e) && !INACTIVE_STATUSES.has(e.status));
-    for (const e of expired) {
-      try {
-        await archiveEntry(e, 'expired', 'TTL 到期自动归档');
-        archivedHandoffs.push(e.id);
-      } catch {
-        // non-fatal
+    await withStoreTransaction(stores.globalDir, async () => {
+      const expired = entries.filter(e => e.scope === 'handoff' && !e.readOnly && isHandoffExpired(e) && !INACTIVE_STATUSES.has(e.status));
+      for (const e of expired) {
+        try {
+          await archiveEntry(e, 'expired', 'TTL 到期自动归档');
+          archivedHandoffs.push(e.id);
+        } catch {
+          // non-fatal: another process may have archived it already
+        }
       }
-    }
+    });
     if (archivedHandoffs.length) entries = entries.filter(e => !archivedHandoffs.includes(e.id));
   }
 
@@ -338,15 +341,17 @@ function renderBootBlock(boot) {
   return parts.join('\n');
 }
 
-async function touchEntryAccess(entry) {
+async function touchEntryAccess(stores, entry) {
   if (!entry || entry.readOnly || !entry.rootDir) return;
   const today = todayStr();
   if (entry.last_access === today) return;
   try {
-    const raw = await safeReadText(entry.rootDir, entry.relPath);
-    const { data, body } = parseFrontmatter(raw);
-    data.last_access = today;
-    await atomicWriteText(entry.rootDir, entry.relPath, serializeEntry(data, body));
+    await withStoreTransaction(stores.globalDir, async () => {
+      const raw = await safeReadText(entry.rootDir, entry.relPath);
+      const { data, body } = parseFrontmatter(raw);
+      data.last_access = today;
+      await atomicWriteText(entry.rootDir, entry.relPath, serializeEntry(data, body));
+    });
   } catch {
     // non-fatal
   }
@@ -356,7 +361,7 @@ async function loadEntryById(stores, id, { touchAccess = true } = {}) {
   const entries = await loadAllEntries(stores);
   const found = entries.find(e => e.id === id);
   if (!found) return null;
-  if (touchAccess) await touchEntryAccess(found);
+  if (touchAccess) await touchEntryAccess(stores, found);
   return found;
 }
 
@@ -382,16 +387,37 @@ function uniqueId(entries, rootDir, baseId, relPathOf) {
   return id;
 }
 
+const SECRET_PATTERNS = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, '私钥'],
+  [/\b(?:sk|rk)-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}/, 'API Key'],
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}/, 'GitHub Token'],
+  [/\bgithub_pat_[A-Za-z0-9_]{30,}/, 'GitHub Token'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'AWS Access Key'],
+  [/\bxox[abpr]-[A-Za-z0-9-]{10,}/, 'Slack Token'],
+  [/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, 'JWT'],
+  [/\b(?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*["']?[A-Za-z0-9_\-/+=]{16,}/i, '凭据赋值'],
+];
+const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/;
+
+function assertSafeText(text, label) {
+  if (INVISIBLE_CHARS.test(text)) throw new Error(`${label} 含不可见控制字符，已拒绝写入`);
+  const hit = SECRET_PATTERNS.find(([re]) => re.test(text));
+  if (hit) throw new Error(`${label} 疑似包含${hit[1]}，记忆会被注入上下文并可能提交到 Git，已拒绝写入；请改用占位符`);
+}
+
+const singleLine = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+
 function validateItems(items, stores) {
   if (!Array.isArray(items) || !items.length) throw new Error('items must be a non-empty array');
   if (items.length > 5) throw new Error('at most 5 items per proposal');
   return items.map((item, idx) => {
-    const title = String(item?.title ?? '').trim();
+    const title = singleLine(item?.title);
     const content = String(item?.content ?? '').trim();
     if (!title) throw new Error(`items[${idx}].title is required`);
     if (!content) throw new Error(`items[${idx}].content is required`);
     if (title.length > 140) throw new Error(`items[${idx}].title exceeds 140 chars`);
     if (content.length > 12000) throw new Error(`items[${idx}].content exceeds 12000 chars`);
+    assertSafeText([title, item?.summary, content, ...asList(item?.keywords), ...asList(item?.triggers)].join('\n'), `items[${idx}]`);
 
     let scope = ['global', 'project', 'handoff'].includes(item.scope) ? item.scope : null;
     let type = [...LONG_TERM_TYPES, 'handoff'].includes(item.type) ? item.type : null;
@@ -410,7 +436,7 @@ function validateItems(items, stores) {
     const salience = [1, 2, 3].includes(Number(item.salience)) ? Number(item.salience) : 2;
     return {
       title,
-      summary: clip(String(item?.summary || title), 120),
+      summary: clip(singleLine(item?.summary) || title, 120),
       content,
       keywords: asList(item?.keywords).slice(0, 12),
       triggers: asList(item?.triggers).slice(0, 12),
@@ -461,9 +487,10 @@ function renderDshSectionIndex(existingIndex, activeEntries) {
   return `${out.join('\n').trimEnd()}\n`;
 }
 
-async function rebuildIndexAndAppendLog(rootDir, scopeLabel, logLines) {
-  const dirs = fs.existsSync(path.join(rootDir, 'project.md')) ? PROJECT_CONTENT_DIRS : GLOBAL_CONTENT_DIRS;
-  const entries = await loadScopeEntries(rootDir, dirs, scopeLabel);
+async function rebuildIndexAndAppendLog(rootDir, logLines) {
+  const isProject = fs.existsSync(path.join(rootDir, 'project.md'));
+  const scopeLabel = isProject ? 'project' : 'global';
+  const entries = await loadScopeEntries(rootDir, isProject ? PROJECT_CONTENT_DIRS : GLOBAL_CONTENT_DIRS, scopeLabel);
   const active = entries.filter(e => isActiveEntry(e));
 
   let existingIndex = '';
@@ -500,8 +527,6 @@ async function rebuildIndexAndAppendLog(rootDir, scopeLabel, logLines) {
   }
 }
 
-const scopeLabelOf = (rootDir, stores) => (rootDir === stores.globalDir ? 'global' : 'project');
-
 function archiveRelPath(rootDir, relPath) {
   const base = path.basename(relPath, '.md');
   let candidate = `archive/${base}.md`;
@@ -517,7 +542,7 @@ async function archiveEntry(entry, status, reason = '') {
   const archiveRel = archiveRelPath(entry.rootDir, entry.relPath);
   await atomicWriteText(entry.rootDir, archiveRel, serializeEntry(parsed.data, parsed.body));
   await safeRemove(entry.rootDir, entry.relPath);
-  await rebuildIndexAndAppendLog(entry.rootDir, entry.scope === 'global' ? 'global' : 'project', [
+  await rebuildIndexAndAppendLog(entry.rootDir, [
     `## [${todayStr()}] archive(${status}) | ${entry.id} -> ${archiveRel}${reason ? ` (${reason})` : ''}`,
   ]);
   return archiveRel;
@@ -573,7 +598,7 @@ async function applyHandoff(stores, entries, item, agent) {
     await atomicWriteText(rootDir, relPath, serializeEntry(meta, item.content));
   }
   const action = closing ? 'close' : (existing ? 'update' : 'create');
-  await rebuildIndexAndAppendLog(rootDir, scopeLabelOf(rootDir, stores), [
+  await rebuildIndexAndAppendLog(rootDir, [
     `## [${today}] handoff-${action}(${item.status}) | ${id} — ${item.title} (by ${agent || 'agent'})`,
   ]);
   return { action, id, scope: 'handoff', status: item.status, relPath: finalRel, rootDir, targetId: existing?.id || null };
@@ -638,7 +663,7 @@ async function applyItemDecision(stores, entries, item, decision, agent) {
         parsedOld.data.updated_at = today;
         await atomicWriteText(old.rootDir, old.relPath, serializeEntry(parsedOld.data, parsedOld.body));
         if (old.rootDir !== rootDir) {
-          await rebuildIndexAndAppendLog(old.rootDir, old.scope === 'global' ? 'global' : 'project', [
+          await rebuildIndexAndAppendLog(old.rootDir, [
             `## [${today}] ${action} | ${old.id} -> ${newId}`,
           ]);
         }
@@ -648,7 +673,7 @@ async function applyItemDecision(stores, entries, item, decision, agent) {
     }
   }
 
-  await rebuildIndexAndAppendLog(rootDir, scopeLabelOf(rootDir, stores), [
+  await rebuildIndexAndAppendLog(rootDir, [
     `## [${today}] ${action} | ${newId} — ${item.title} (by ${agent || 'agent'})`,
   ]);
 
@@ -682,16 +707,19 @@ async function proposeMemory(stores, { items, agent = 'unknown', sessionId = nul
   await scaffoldGlobalStore(stores.globalDir);
   if (stores.projectDir) await scaffoldProjectStore(stores.projectDir);
 
+  if (!requireReview) {
+    return withStoreTransaction(stores.globalDir, async () => {
+      const entries = await loadAllEntries(stores);
+      const committed = [];
+      for (const [idx, item] of cleanItems.entries()) {
+        const p = prepareItem(entries, stores, item, idx);
+        committed.push(await applyItemDecision(stores, entries, p.item, p.suggestion, agent));
+      }
+      return { status: 'committed', autoCommitted: true, committed };
+    });
+  }
   const entries = await loadAllEntries(stores);
   const prepared = cleanItems.map((item, idx) => prepareItem(entries, stores, item, idx));
-
-  if (!requireReview) {
-    const committed = [];
-    for (const p of prepared) {
-      committed.push(await applyItemDecision(stores, entries, p.item, p.suggestion, agent));
-    }
-    return { status: 'committed', autoCommitted: true, committed };
-  }
   const batchId = `batch-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const batch = {
     id: batchId,
@@ -732,7 +760,11 @@ async function listInboxBatches(stores) {
   return batches.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
-async function commitBatch(stores, batchId, decisionsByKey = {}) {
+function commitBatch(stores, batchId, decisionsByKey = {}) {
+  return withStoreTransaction(stores.globalDir, () => commitBatchLocked(stores, batchId, decisionsByKey));
+}
+
+async function commitBatchLocked(stores, batchId, decisionsByKey) {
   const batches = await listInboxBatches(stores);
   const batch = batches.find(b => b.id === batchId);
   if (!batch) throw new Error(`Pending batch not found: ${batchId}`);
@@ -749,21 +781,24 @@ async function commitBatch(stores, batchId, decisionsByKey = {}) {
   return { batchId, results };
 }
 
-async function forgetEntry(stores, { id, mode = 'deprecate', reason = '', confirm = false } = {}) {
+function forgetEntry(stores, options = {}) {
+  return withStoreTransaction(stores.globalDir, () => forgetEntryLocked(stores, options));
+}
+
+async function forgetEntryLocked(stores, { id, mode = 'deprecate', reason = '', confirm = false } = {}) {
   const entries = await loadAllEntries(stores);
   const target = entries.find(e => e.id === id);
   if (!target) throw new Error(`Memory entry not found: ${id}`);
   if (target.readOnly) throw new Error(`Entry is read-only: ${id}`);
 
   const today = todayStr();
-  const scopeLabel = target.scope === 'global' ? 'global' : 'project';
 
   if (mode === 'delete') {
     if (!confirm) {
       throw new Error(`Physical delete of ${id} requires explicit confirm: true (use mode: "deprecate" or "archive" for autonomous cleanup).`);
     }
     await safeRemove(target.rootDir, target.relPath);
-    await rebuildIndexAndAppendLog(target.rootDir, scopeLabel, [
+    await rebuildIndexAndAppendLog(target.rootDir, [
       `## [${today}] delete | ${id}${reason ? ` — ${reason}` : ''}`,
     ]);
     return { id, mode: 'delete', removed: true };
@@ -780,7 +815,7 @@ async function forgetEntry(stores, { id, mode = 'deprecate', reason = '', confir
   parsed.data.updated_at = today;
   if (reason) parsed.data.deprecated_reason = reason;
   await atomicWriteText(target.rootDir, target.relPath, serializeEntry(parsed.data, parsed.body));
-  await rebuildIndexAndAppendLog(target.rootDir, scopeLabel, [
+  await rebuildIndexAndAppendLog(target.rootDir, [
     `## [${today}] deprecate | ${id}${reason ? ` — ${reason}` : ''}`,
   ]);
   return { id, mode: 'deprecate', status: 'deprecated' };

@@ -57,10 +57,22 @@ function prepared(entry) {
   return entry._norm;
 }
 
+const termMatchers = new Map();
+
+function containsTerm(text, term) {
+  if (/[\p{Script=Han}]/u.test(term)) return text.includes(term);
+  let re = termMatchers.get(term);
+  if (!re) {
+    re = new RegExp(`(?<![\\p{L}\\p{N}])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'u');
+    termMatchers.set(term, re);
+  }
+  return re.test(text);
+}
+
 function fieldHit(entry, term) {
   const f = prepared(entry);
-  if (f.title.includes(term) || f.keywords.includes(term)) return 'strong';
-  if (f.summary.includes(term) || f.body.includes(term)) return 'weak';
+  if (containsTerm(f.title, term) || containsTerm(f.keywords, term)) return 'strong';
+  if (containsTerm(f.summary, term) || containsTerm(f.body, term)) return 'weak';
   return null;
 }
 

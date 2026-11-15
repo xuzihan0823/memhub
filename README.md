@@ -39,10 +39,24 @@ export MEMHUB_RERANK_TIMEOUT_MS=1500                            # 可选
 
 注意：开启后，候选记忆的标题与摘要、当前提问会发送到该接口。
 
+## 后台复盘
+
+Agent 经常忘了主动写记忆，后台复盘用来补这个缺口：每隔 N 轮对话，以及会话结束时，把这段对话交给一个模型，让它按写入规则挑出值得长期保存的内容。挑出的候选**不会直接写入**，而是进入 Inbox，确认后才生效（Web 控制台、`memhub inbox` / `memhub commit <batchId>`）。
+
+```bash
+export MEMHUB_REVIEW_URL=https://<OPENAI_COMPATIBLE_HOST>/v1   # 未设置则不复盘
+export MEMHUB_REVIEW_MODEL=<model>
+export MEMHUB_REVIEW_API_KEY=<key>                              # 可选
+export MEMHUB_REVIEW_INTERVAL=10                                # 每 N 轮用户消息复盘一次，默认 10
+export MEMHUB_REVIEW_TIMEOUT_MS=60000                           # 可选
+```
+
+Claude Code 在 `Stop` 达到间隔、或 `SessionEnd` 时启动一个独立后台进程（`memhub review`），不阻塞对话；PI-Desktop 插件在 `agent_end` 和 `session_shutdown` 时触发。发送前会去掉注入的 `<memory-*>` 块并把疑似密钥替换为 `<REDACTED>`，对话正文最多约 2.4 万字符。注意：开启后，对话内容会发送到该接口。
+
 ## 接入方式
 
 - **PI-Desktop 插件**（`adapters/pi-desktop/`）：进程内直接读写记忆库，不需要守护进程；注入启动目录、每轮检索、工具报错后检索，并提供 search / load / propose / forget 四个工具。
-- **Claude Code**：`SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PostToolUseFailure` / `Stop` 五个 Hook + MCP。`Stop` Hook 在本轮改过文件却没更新交接单时，会要求 Agent 先更新交接单（可用 `MEMHUB_STOP_NUDGE=0` 关闭）。
+- **Claude Code**：`SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PostToolUseFailure` / `Stop` / `SessionEnd` 六个 Hook + MCP。`Stop` Hook 在本轮改过文件却没更新交接单时，会要求 Agent 先更新交接单（可用 `MEMHUB_STOP_NUDGE=0` 关闭）；`Stop` 与 `SessionEnd` 还负责按间隔触发后台复盘。已安装过的用户需重新运行 `memhub init --agents claude` 才会注册 `SessionEnd`。
 - **Codex / Cursor / Pi CLI**：MCP（`memhub mcp`）+ `adapters/cursor-codex/SKILL.md` 规则。没有 Hook，只能靠 Agent 主动调用。安装 Codex 时会遵循 `CODEX_HOME` 环境变量。
 - **纯文件兜底**：自描述的 `MEMORY.md` 与自动维护的 `index.md`。
 

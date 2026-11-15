@@ -5,17 +5,45 @@ const { clip, sanitizeInline } = require('./markdown');
 const DEFAULT_TIMEOUT_MS = 1500;
 const MAX_CANDIDATES = 40;
 
-function rerankConfig(env = process.env) {
-  const url = String(env.MEMHUB_RERANK_URL || '').trim();
-  const model = String(env.MEMHUB_RERANK_MODEL || '').trim();
+function modelConfig(env, prefix, defaultTimeoutMs) {
+  const url = String(env[`${prefix}_URL`] || '').trim().replace(/\/+$/, '');
+  const model = String(env[`${prefix}_MODEL`] || '').trim();
   if (!url || !model) return null;
-  const timeout = Number(env.MEMHUB_RERANK_TIMEOUT_MS);
+  const timeout = Number(env[`${prefix}_TIMEOUT_MS`]);
   return {
-    url: url.replace(/\/+$/, '').endsWith('/chat/completions') ? url : `${url.replace(/\/+$/, '')}/chat/completions`,
+    url: url.endsWith('/chat/completions') ? url : `${url}/chat/completions`,
     model,
-    apiKey: String(env.MEMHUB_RERANK_API_KEY || '').trim(),
-    timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_TIMEOUT_MS,
+    apiKey: String(env[`${prefix}_API_KEY`] || '').trim(),
+    timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : defaultTimeoutMs,
   };
+}
+
+function rerankConfig(env = process.env) {
+  return modelConfig(env, 'MEMHUB_RERANK', DEFAULT_TIMEOUT_MS);
+}
+
+async function chatCompletion(config, messages, { maxTokens, fetchImpl = globalThis.fetch } = {}) {
+  if (!config || typeof fetchImpl !== 'function') return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), config.timeoutMs);
+  try {
+    const res = await fetchImpl(config.url, {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model: config.model, temperature: 0, max_tokens: maxTokens, messages }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return String(data?.choices?.[0]?.message?.content ?? '');
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function buildRerankMessages(query, candidates, limit) {
@@ -53,39 +81,18 @@ function parseRerankIds(text, allowed) {
 }
 
 async function rerankWithModel(query, candidates, { config = rerankConfig(), limit = 5, fetchImpl = globalThis.fetch } = {}) {
-  if (!config || !candidates.length || typeof fetchImpl !== 'function') return null;
+  if (!config || !candidates.length) return null;
   const pool = candidates.slice(0, MAX_CANDIDATES);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), config.timeoutMs);
-  try {
-    const res = await fetchImpl(config.url, {
-      method: 'POST',
-      signal: ctrl.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: config.model,
-        temperature: 0,
-        max_tokens: 200,
-        messages: buildRerankMessages(query, pool, limit),
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const ids = parseRerankIds(data?.choices?.[0]?.message?.content, new Set(pool.map(e => e.id)));
-    if (!ids) return null;
-    const byId = new Map(pool.map(e => [e.id, e]));
-    return ids.slice(0, limit).map(id => byId.get(id));
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+  const text = await chatCompletion(config, buildRerankMessages(query, pool, limit), { maxTokens: 200, fetchImpl });
+  const ids = parseRerankIds(text, new Set(pool.map(e => e.id)));
+  if (!ids) return null;
+  const byId = new Map(pool.map(e => [e.id, e]));
+  return ids.slice(0, limit).map(id => byId.get(id));
 }
 
 module.exports = {
+  modelConfig,
+  chatCompletion,
   rerankConfig,
   buildRerankMessages,
   parseRerankIds,

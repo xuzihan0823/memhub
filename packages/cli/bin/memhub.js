@@ -157,6 +157,13 @@ async function main() {
     return;
   }
 
+  if (cmd === 'review') {
+    const stores = core.resolveStores({ cwd: flags.cwd || process.cwd() });
+    const messages = core.readClaudeTranscript(flags.transcript);
+    console.log(JSON.stringify(await core.reviewConversation(stores, { messages, sessionId: flags.session || null, agent: 'claude-code-review' }), null, 2));
+    return;
+  }
+
   if (cmd === 'commit') {
     const batchId = positional[1];
     if (!batchId) throw new Error('Usage: memhub commit <batchId>');
@@ -175,6 +182,7 @@ async function main() {
     '  memhub hook <host> --event <Event>                  各宿主 Hook 桥接入口',
     '  memhub search <query>                               检索全局与当前项目记忆',
     '  memhub inbox / commit <batchId>                     查看或确认待审提案',
+    '  memhub review --transcript <jsonl>                  复盘一段 Claude Code 对话，候选记忆进入 inbox',
     '  memhub lint / doctor / uninstall                    体检、诊断与无损卸载',
   ].join('\n'));
 }

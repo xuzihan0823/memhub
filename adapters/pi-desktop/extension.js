@@ -11,6 +11,7 @@ const TOOLS = { load: `${TOOL_PREFIX}load`, search: `${TOOL_PREFIX}search`, prop
 const EDIT_TOOLS = new Set(['edit', 'write', 'multiedit', 'read']);
 const MAX_CACHE = 500;
 const MAX_TOOL_INJECTIONS_PER_SESSION = 20;
+const MAX_REVIEW_BUFFER = 400;
 
 const injections = new Map();
 const boots = new Map();
@@ -40,7 +41,7 @@ const sessionIdOf = ctx => {
 
 function sessionState(ctx) {
   const key = `${sessionIdOf(ctx)}\0${ctx?.cwd || ''}`;
-  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0 });
+  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, turns: 0, buffer: [], review: null });
   return sessions.get(key);
 }
 
@@ -223,9 +224,32 @@ function onBeforeAgentStart(event) {
   return { systemPrompt: `${event.systemPrompt}${GUIDANCE}` };
 }
 
+function onAgentEnd(event, ctx, { force = false } = {}) {
+  const cwd = ctx?.cwd;
+  const config = localCore?.reviewConfig();
+  if (!config || typeof cwd !== 'string' || !cwd) return undefined;
+  const state = sessionState(ctx);
+  if (Array.isArray(event?.messages)) {
+    state.buffer.push(...event.messages);
+    if (state.buffer.length > MAX_REVIEW_BUFFER) state.buffer.splice(0, state.buffer.length - MAX_REVIEW_BUFFER);
+    if (event.messages.some(m => m?.role === 'user')) state.turns += 1;
+  }
+  if (!state.buffer.length || (!force && (state.review || state.turns < config.interval))) return force ? state.review || undefined : undefined;
+  const messages = state.buffer.splice(0);
+  state.turns = 0;
+  const run = Promise.resolve(state.review)
+    .then(() => localCore.reviewConversation(localCore.resolveStores({ cwd }), { messages, sessionId: sessionIdOf(ctx), agent: 'pi-desktop-review', config }))
+    .catch(() => null)
+    .finally(() => { if (state.review === run) state.review = null; });
+  state.review = run;
+  return force ? run : undefined;
+}
+
 module.exports = function memhubExtension(pi) {
   pi.on('before_agent_start', event => onBeforeAgentStart(event));
   pi.on('before_provider_request', (event, ctx) => onProviderRequest(event, ctx));
   pi.on('tool_result', (event, ctx) => onToolResult(event, ctx));
+  pi.on('agent_end', (event, ctx) => { onAgentEnd(event, ctx); });
+  pi.on('session_shutdown', (_event, ctx) => onAgentEnd({}, ctx, { force: true }));
 };
-module.exports._internals = { onProviderRequest, onToolResult, injections, boots, sessions, TOOLS };
+module.exports._internals = { onProviderRequest, onToolResult, onAgentEnd, injections, boots, sessions, TOOLS };

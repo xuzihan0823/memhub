@@ -66,7 +66,7 @@ const TOOLS = [
   },
   {
     name: 'memory_propose',
-    description: 'Write long-term memory or update a task handoff. Long-term: only what stays true after the task ends (global if true in any project, else project); same title supersedes the old conclusion. Handoff (scope="handoff"): cross-session task state keyed by task; resubmitting the same task updates it in place, status done/abandoned archives it. Commits directly unless requireReview is true.',
+    description: 'Write long-term memory or update a task handoff. Long-term: only what stays true after the task ends and is grounded in a user message or tool output (global if true in any project, else project); never infer user traits, never save setup failures, "tool X is broken" claims, transient errors, one-off narratives or unverified attempts; same title supersedes the old conclusion. Handoff (scope="handoff"): cross-session task state keyed by task; resubmitting the same task updates it in place, status done/abandoned archives it. Commits directly unless requireReview is true.',
     inputSchema: {
       type: 'object',
       properties: {

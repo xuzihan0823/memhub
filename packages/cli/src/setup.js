@@ -13,6 +13,7 @@ const CLAUDE_HOOK_EVENTS = [
   ['PostToolUse', 'Edit|Write|MultiEdit|NotebookEdit|Read'],
   ['PostToolUseFailure', null],
   ['Stop', null],
+  ['SessionEnd', null],
 ];
 const CODEX_START = '# >>> memhub-mcp >>>';
 const CODEX_END = '# <<< memhub-mcp <<<';

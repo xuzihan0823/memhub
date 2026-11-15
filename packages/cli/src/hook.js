@@ -4,12 +4,37 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 const core = require('../../core/src');
 
 const MAX_SEEN = 200;
 const MAX_TOOL_INJECTIONS_PER_TURN = 3;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const NO_OUTPUT = '{}';
+const MEMHUB_BIN = path.resolve(__dirname, '../bin/memhub.js');
+
+function spawnReview({ transcriptPath, cwd, sessionId }) {
+  const child = spawn(process.execPath, [MEMHUB_BIN, 'review', '--transcript', transcriptPath, '--cwd', cwd, '--session', sessionId], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  });
+  child.unref();
+}
+
+function maybeReview(state, payload, { cwd, sessionId, force, spawnImpl }) {
+  const config = core.reviewConfig();
+  const transcriptPath = payload.transcript_path;
+  const pending = state.turn - (state.reviewedTurn || 0);
+  if (!config || typeof transcriptPath !== 'string' || !transcriptPath || pending < 1) return;
+  if (!force && pending < config.interval) return;
+  state.reviewedTurn = state.turn;
+  try {
+    (spawnImpl || spawnReview)({ transcriptPath, cwd, sessionId });
+  } catch {
+    // non-fatal
+  }
+}
 
 function cacheFileFor({ cacheDir, cwd, sessionId }) {
   if (!sessionId) return null;
@@ -90,7 +115,7 @@ function contextOutput(eventName, text) {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: eventName, additionalContext: text } });
 }
 
-async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, cacheDir, fetchImpl } = {}) {
+async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, cacheDir, fetchImpl, spawnImpl } = {}) {
   const cwd = payload.cwd || flags.cwd || process.cwd();
   const stores = core.resolveStores({ cwd, homeDir, globalDir });
   const sessionId = String(payload.session_id || payload.sessionId || '');
@@ -99,7 +124,7 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
 
   if (event === 'SessionStart') {
     const source = String(payload.source || 'startup');
-    const fresh = { ids: [], dirs: [], turn: 0, toolInjections: 0, wrote: false, handoffTouched: false };
+    const fresh = { ids: [], dirs: [], turn: 0, toolInjections: 0, wrote: false, handoffTouched: false, reviewedTurn: 0 };
     await core.scaffoldGlobalStore(stores.globalDir);
     const boot = await core.bootContext(stores);
     writeState(file, source === 'resume' ? { ...state, toolInjections: 0 } : fresh);
@@ -167,6 +192,7 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     const pending = await core.listInboxBatches(stores);
     if (pending.length) notes.push(`MemHub 提示：当前有 ${pending.length} 条待审批记忆提案，可运行 memhub ui 处理。`);
     const shouldNudge = state.wrote && !state.handoffTouched && !payload.stop_hook_active && process.env.MEMHUB_STOP_NUDGE !== '0';
+    if (!payload.stop_hook_active) maybeReview(state, payload, { cwd, sessionId, force: false, spawnImpl });
     writeState(file, { ...state, wrote: false });
     if (shouldNudge) {
       return JSON.stringify({
@@ -175,6 +201,12 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
       });
     }
     return notes.length ? JSON.stringify({ systemMessage: notes.join('\n') }) : NO_OUTPUT;
+  }
+
+  if (event === 'SessionEnd') {
+    maybeReview(state, payload, { cwd, sessionId, force: true, spawnImpl });
+    writeState(file, state);
+    return NO_OUTPUT;
   }
 
   return NO_OUTPUT;

@@ -7,4 +7,5 @@ module.exports = {
   ...require('./store'),
   ...require('./rerank'),
   ...require('./retrieve'),
+  ...require('./review'),
 };

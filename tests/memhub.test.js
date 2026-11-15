@@ -926,3 +926,53 @@ test('review: pi-desktop reviews buffered runs every N user turns and on shutdow
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
+
+test('model config: file works without shell exports and environment overrides it', async () => {
+  const { base, globalDir } = await makeTempWorkspace();
+  const env = { MEMHUB_GLOBAL_DIR: globalDir };
+  const file = path.join(globalDir, 'config.json');
+  try {
+    assert.equal(core.reviewConfig(env), null);
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(file, JSON.stringify({ review: {
+      url: 'http://127.0.0.1:3425/v1/', model: 'example/light-model',
+      interval: 3, reasoningEffort: 'low', timeoutMs: 60000,
+    } }));
+    const config = core.reviewConfig(env);
+    assert.equal(config.url, 'http://127.0.0.1:3425/v1/chat/completions');
+    assert.equal(config.model, 'example/light-model');
+    assert.equal(config.interval, 3);
+    assert.equal(config.reasoningEffort, 'low');
+    assert.equal(config.apiKey, '');
+    assert.equal(core.rerankConfig(env), null);
+
+    const override = core.reviewConfig({ ...env, ...REVIEW_ENV, MEMHUB_REVIEW_REASONING_EFFORT: 'none' });
+    assert.equal(override.url, 'https://example.com/v1/chat/completions');
+    assert.equal(override.model, 'small');
+    assert.equal(override.interval, 2);
+    assert.equal(override.reasoningEffort, 'none');
+    assert.equal(core.reviewConfig({ ...env, MEMHUB_REVIEW_ENABLED: '0' }), null);
+
+    let request;
+    const text = await core.chatCompletion(config, [{ role: 'user', content: '测试' }], {
+      maxTokens: 1500,
+      fetchImpl: async (url, init) => {
+        request = { url, ...init, body: JSON.parse(init.body) };
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"items":[]}' } }] }) };
+      },
+    });
+    assert.equal(text, '{"items":[]}');
+    assert.equal(request.body.reasoning_effort, 'low');
+    assert.equal(request.headers['User-Agent'], 'memhub/1');
+    assert.equal(request.headers.Authorization, undefined);
+
+    await fsp.writeFile(file, JSON.stringify({ review: { enabled: false, url: config.url, model: config.model } }));
+    assert.equal(core.reviewConfig(env), null);
+    assert.ok(core.reviewConfig({ ...env, MEMHUB_REVIEW_ENABLED: '1' }));
+    await fsp.writeFile(file, '{broken');
+    assert.equal(core.reviewConfig(env), null);
+    assert.equal(core.reviewConfig({ ...env, ...REVIEW_ENV }).model, 'small');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "memhub.universal-memory",
   "name": "MemHub Universal Memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Shares MemHub local memory (global ~/.memory + project .memory) with PI-Desktop: session-start memory catalog and handoffs, per-turn and tool-error retrieval, and tools to search, load, propose and forget memories. Runs in-process; the HTTP daemon is only a fallback.",
   "license": "MIT",
   "engines": {
@@ -26,7 +26,7 @@
       "localhost"
     ]
   },
-  "safetyNotes": "Reads and writes only MemHub memory stores (~/.memory and <project>/.memory) in-process. Falls back to the local MemHub daemon at 127.0.0.1:4789 when the bundled core is missing. Optional: when MEMHUB_RERANK_* or MEMHUB_REVIEW_* environment variables are set, memory headers (rerank) or redacted conversation text (background review) are sent to that user-configured OpenAI-compatible endpoint; review results only enter the inbox for approval. Physical deletion requires confirm=true.",
+  "safetyNotes": "Reads and writes MemHub memory stores (~/.memory and <project>/.memory) in-process. Falls back to the local daemon at 127.0.0.1:4789 when the bundled core is missing. Optional model calls are configured in the global store's config.json (review/rerank sections) or MEMHUB_REVIEW_* / MEMHUB_RERANK_* environment variables. Memory headers (rerank) or redacted conversation text (background review) are sent to that configured OpenAI-compatible endpoint, including a local Magpie gateway. Background review results only enter the inbox for approval. Physical deletion requires confirm=true.",
   "contributes": {
     "agentExtensions": [
       "extension.js"

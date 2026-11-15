@@ -43,12 +43,33 @@ export MEMHUB_RERANK_TIMEOUT_MS=1500                            # 可选
 
 Agent 经常忘了主动写记忆，后台复盘用来补这个缺口：每隔 N 轮对话，以及会话结束时，把这段对话交给一个模型，让它按写入规则挑出值得长期保存的内容。挑出的候选**不会直接写入**，而是进入 Inbox，确认后才生效（Web 控制台、`memhub inbox` / `memhub commit <batchId>`）。
 
+从 Dock / Finder 启动 PI-Desktop 时，推荐在全局记忆库的 `config.json`（默认 `~/.memory/config.json`）配置，无需设置系统环境变量。文件不应包含真实密钥并提交到 Git；本机 Magpie 通常无需 API Key：
+
+```json
+{
+  "review": {
+    "enabled": true,
+    "url": "http://127.0.0.1:3425/v1",
+    "model": "<provider>/<light-model>",
+    "reasoningEffort": "low",
+    "interval": 3,
+    "timeoutMs": 60000
+  }
+}
+```
+
+`model` 填 Magpie `/v1/models` 中的完整 ID，选你希望用于复盘的轻量模型。短请求或“复盘”提示词不保证网关自动降级；`group/coding` 也可能被配置为主模型，不能视作低价模型别名。`reasoningEffort` 是可选的思考强度，需模型支持。此配置只开启复盘；精排可另加 `rerank` 配置段。
+
+仍支持环境变量，逐字段覆盖文件配置。把文件中 `review.enabled` 改为 `false`，或设置 `MEMHUB_REVIEW_ENABLED=0` 即可关闭；未提供完整的 URL 与模型时保持关闭：
+
 ```bash
-export MEMHUB_REVIEW_URL=https://<OPENAI_COMPATIBLE_HOST>/v1   # 未设置则不复盘
+export MEMHUB_REVIEW_URL=https://<OPENAI_COMPATIBLE_HOST>/v1
 export MEMHUB_REVIEW_MODEL=<model>
 export MEMHUB_REVIEW_API_KEY=<key>                              # 可选
 export MEMHUB_REVIEW_INTERVAL=10                                # 每 N 轮用户消息复盘一次，默认 10
 export MEMHUB_REVIEW_TIMEOUT_MS=60000                           # 可选
+export MEMHUB_REVIEW_REASONING_EFFORT=low                        # 可选
+export MEMHUB_REVIEW_ENABLED=0                                  # 可选：关闭复盘
 ```
 
 Claude Code 在 `Stop` 达到间隔、或 `SessionEnd` 时启动一个独立后台进程（`memhub review`），不阻塞对话；PI-Desktop 插件在 `agent_end` 和 `session_shutdown` 时触发。发送前会去掉注入的 `<memory-*>` 块并把疑似密钥替换为 `<REDACTED>`，对话正文最多约 2.4 万字符。注意：开启后，对话内容会发送到该接口。

@@ -1,20 +1,42 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
 const { clip, sanitizeInline } = require('./markdown');
 
 const DEFAULT_TIMEOUT_MS = 1500;
 const MAX_CANDIDATES = 40;
 
+function readModelSettings(env, prefix) {
+  const root = env.MEMHUB_GLOBAL_DIR || path.join(os.homedir(), '.memory');
+  try {
+    const file = path.join(root, 'config.json');
+    if (fs.statSync(file).size > 64 * 1024) return {};
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const section = settings?.[prefix === 'MEMHUB_REVIEW' ? 'review' : 'rerank'];
+    return section && typeof section === 'object' && !Array.isArray(section) ? section : {};
+  } catch {
+    return {};
+  }
+}
+
 function modelConfig(env, prefix, defaultTimeoutMs) {
-  const url = String(env[`${prefix}_URL`] || '').trim().replace(/\/+$/, '');
-  const model = String(env[`${prefix}_MODEL`] || '').trim();
+  const settings = readModelSettings(env, prefix);
+  const enabled = env[`${prefix}_ENABLED`];
+  if (enabled === '0' || enabled === 'false' || (settings.enabled === false && enabled !== '1')) return null;
+  const url = String(env[`${prefix}_URL`] ?? settings.url ?? '').trim().replace(/\/+$/, '');
+  const model = String(env[`${prefix}_MODEL`] ?? settings.model ?? '').trim();
   if (!url || !model) return null;
-  const timeout = Number(env[`${prefix}_TIMEOUT_MS`]);
+  const timeout = Number(env[`${prefix}_TIMEOUT_MS`] ?? settings.timeoutMs);
+  const effort = String(env[`${prefix}_REASONING_EFFORT`] ?? settings.reasoningEffort ?? '').trim();
   return {
     url: url.endsWith('/chat/completions') ? url : `${url}/chat/completions`,
     model,
-    apiKey: String(env[`${prefix}_API_KEY`] || '').trim(),
+    apiKey: String(env[`${prefix}_API_KEY`] ?? settings.apiKey ?? '').trim(),
     timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : defaultTimeoutMs,
+    interval: Number(env[`${prefix}_INTERVAL`] ?? settings.interval),
+    reasoningEffort: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(effort) ? effort : undefined,
   };
 }
 
@@ -32,9 +54,13 @@ async function chatCompletion(config, messages, { maxTokens, fetchImpl = globalT
       signal: ctrl.signal,
       headers: {
         'Content-Type': 'application/json',
+        'User-Agent': 'memhub/1',
         ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
       },
-      body: JSON.stringify({ model: config.model, temperature: 0, max_tokens: maxTokens, messages }),
+      body: JSON.stringify({
+        model: config.model, temperature: 0, max_tokens: maxTokens, messages,
+        ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
+      }),
     });
     if (!res.ok) return null;
     const data = await res.json();

@@ -15,7 +15,7 @@ const MAX_CATALOG = 120;
 function reviewConfig(env = process.env) {
   const config = modelConfig(env, 'MEMHUB_REVIEW', DEFAULT_REVIEW_TIMEOUT_MS);
   if (!config) return null;
-  const interval = Number(env.MEMHUB_REVIEW_INTERVAL);
+  const interval = config.interval;
   return { ...config, interval: Number.isInteger(interval) && interval > 0 ? interval : DEFAULT_NUDGE_INTERVAL };
 }
 

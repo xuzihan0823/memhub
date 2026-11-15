@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 1,
+  "id": "memhub.universal-memory",
+  "name": "MemHub Universal Memory",
+  "version": "0.1.0",
+  "description": "Shares MemHub local memory (global ~/.memory + project .memory) with PI-Desktop: session-start memory catalog and handoffs, per-turn and tool-error retrieval, and tools to search, load, propose and forget memories. Runs in-process; the HTTP daemon is only a fallback.",
+  "license": "MIT",
+  "engines": {
+    "piDesktop": ">=0.15.9"
+  },
+  "activationEvents": [
+    "onStartup"
+  ],
+  "categories": [
+    "productivity"
+  ],
+  "main": "main.js",
+  "permissions": [
+    "agent.tool.register",
+    "agent.extension",
+    "net.fetch"
+  ],
+  "net": {
+    "domains": [
+      "127.0.0.1",
+      "localhost"
+    ]
+  },
+  "safetyNotes": "Reads and writes only MemHub memory stores (~/.memory and <project>/.memory) in-process. Falls back to the local MemHub daemon at 127.0.0.1:4789 when the bundled core is missing. No external network calls; physical deletion requires confirm=true.",
+  "contributes": {
+    "agentExtensions": [
+      "extension.js"
+    ],
+    "agentTools": [
+      {
+        "name": "search",
+        "description": "Search global and project memories by query. Returns IDs, scopes, titles, and one-line summaries (no bodies).",
+        "risk": "low",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "global",
+                "project",
+                "handoff"
+              ]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      },
+      {
+        "name": "load",
+        "description": "Load full Markdown content of one memory entry by exact ID and update last_access.",
+        "risk": "low",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      {
+        "name": "propose",
+        "description": "Write long-term memory or update a task handoff. Long-term: only what stays true after the task ends (global if true in any project, else project); same title supersedes the old conclusion. Handoff (scope=\"handoff\"): cross-session task state keyed by task; resubmitting the same task updates it in place, status done/abandoned archives it. Commits directly unless requireReview is true.",
+        "risk": "medium",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "requireReview": {
+              "type": "boolean",
+              "description": "Optional: queue to inbox instead of committing immediately."
+            },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 5,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "description": "State the conclusion itself, e.g. \"生产镜像必须指定 linux/amd64\"."
+                  },
+                  "summary": {
+                    "type": "string",
+                    "description": "One line: when / under which conditions it applies."
+                  },
+                  "content": {
+                    "type": "string",
+                    "description": "Full text. For handoffs use: 目标 / 验收标准 (- [ ] / - [x] + 证据) / 下一步 / 阻塞 / 相关文件."
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "triggers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Situations and synonyms that should recall this memory (e.g. 上线, 部署, docker build)."
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Optional project-relative globs this memory is tied to (e.g. packages/daemon/**)."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "global",
+                      "project",
+                      "handoff"
+                    ],
+                    "description": "global: still true in any project. project: true only for this repo. handoff: cross-session task state that stops mattering once the task ends."
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "user",
+                      "pref",
+                      "skill",
+                      "decision",
+                      "project",
+                      "note",
+                      "handoff"
+                    ]
+                  },
+                  "salience": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "description": "1 = always relevant, 3 = rarely."
+                  },
+                  "task": {
+                    "type": "string",
+                    "description": "Handoff only: stable task key (branch or short task name). Same key updates the same handoff in place."
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "blocked",
+                      "done",
+                      "abandoned"
+                    ],
+                    "description": "Handoff only. done requires every acceptance item checked with evidence."
+                  },
+                  "ttl_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Handoff only: expire after N days without update (default 14)."
+                  }
+                },
+                "required": [
+                  "title",
+                  "content"
+                ]
+              }
+            }
+          },
+          "required": [
+            "items"
+          ]
+        }
+      },
+      {
+        "name": "forget",
+        "description": "Deprecate or archive an existing memory entry autonomously, or physically delete with confirm=true after explicit user approval.",
+        "risk": "medium",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "deprecate",
+                "archive",
+                "delete"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "confirm": {
+              "type": "boolean",
+              "description": "Required true only for irreversible mode=\"delete\"."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "memhub",
+  "version": "0.1.0",
+  "description": "Universal, Markdown-first local memory system shared across AI coding agents (PI-Desktop, DSH, Claude Code, Codex, Cursor) via MCP, Hooks, CLI, and Web UI.",
+  "type": "commonjs",
+  "bin": {
+    "memhub": "./packages/cli/bin/memhub.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "serve": "node ./packages/cli/bin/memhub.js serve",
+    "doctor": "node ./packages/cli/bin/memhub.js doctor"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ai-agent",
+    "memory",
+    "mcp",
+    "markdown",
+    "claude-code",
+    "codex",
+    "pi-desktop",
+    "deepseek-harness"
+  ]
+}

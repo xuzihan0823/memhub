@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MemHub · 本地跨 Agent 记忆控制台</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #dce2ea;
+      --blue: #2563eb;
+      --blue-bg: #eff6ff;
+      --green: #059669;
+      --green-bg: #ecfdf5;
+      --amber: #d97706;
+      --amber-bg: #fffbeb;
+      --rose: #e11d48;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: var(--sans); background: var(--bg); color: var(--ink); line-height: 1.5; }
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 20px; }
+    header {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 16px 20px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center;
+      margin-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: 18px; }
+    .sub { font-size: 12.5px; color: var(--muted); }
+    .cwd-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input, textarea, select {
+      border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+      font-family: inherit; font-size: 13px; background: #fff; color: var(--ink);
+    }
+    button {
+      border: 1px solid var(--border); background: #fff; color: var(--ink); border-radius: 8px;
+      padding: 7px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+    button.danger { color: var(--rose); border-color: #fecdd3; background: #fff1f2; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .tab.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .grid-2 { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 16px 18px; margin-bottom: 14px;
+    }
+    .card h2 { margin: 0 0 10px; font-size: 15.5px; }
+    .list { display: flex; flex-direction: column; gap: 8px; }
+    .item {
+      border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+      cursor: pointer; background: #fafbfc;
+    }
+    .item:hover { border-color: var(--blue); }
+    .item.selected { border-color: var(--blue); background: var(--blue-bg); }
+    .meta { font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
+    .pill {
+      display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+      background: var(--blue-bg); color: var(--blue); font-weight: 600; margin-right: 6px;
+    }
+    .pill.project { background: var(--green-bg); color: var(--green); }
+    .pill.handoff { background: var(--amber-bg); color: var(--amber); }
+    pre {
+      background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px;
+      font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word;
+    }
+    .form-row { margin-bottom: 10px; }
+    .form-row label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--muted); }
+    .form-row input, .form-row textarea, .form-row select { width: 100%; }
+    svg { width: 100%; height: 420px; border: 1px solid var(--border); border-radius: 10px; background: #fafbfc; }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>MemHub · 本地跨 Agent 记忆控制台</h1>
+        <div class="sub" id="storeInfo">正在连接本地守护进程…</div>
+      </div>
+      <div class="cwd-bar">
+        <input id="cwdInput" type="text" placeholder="工作区路径 (cwd)" style="min-width:260px;" />
+        <button class="primary" id="refreshBtn">切换 / 刷新</button>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-panel="memories">记忆检索与浏览</button>
+      <button class="tab" data-panel="inbox">待审批 Inbox (<span id="inboxCount">0</span>)</button>
+      <button class="tab" data-panel="propose">手动写入 / 提案</button>
+      <button class="tab" data-panel="soul">30 秒快速铸魂 (SOUL)</button>
+      <button class="tab" data-panel="graph">关系图谱与体检</button>
+    </div>
+
+    <!-- Memories Panel -->
+    <section id="panel-memories" class="panel active">
+      <div class="grid-2">
+        <div class="card">
+          <div style="display:flex; gap:8px; margin-bottom:12px;">
+            <input id="searchInput" type="text" placeholder="输入中英文关键词检索…" style="flex:1;" />
+            <select id="scopeSelect">
+              <option value="">全部作用域</option>
+              <option value="global">global</option>
+              <option value="project">project</option>
+              <option value="handoff">handoff</option>
+            </select>
+            <button id="searchBtn" class="primary">搜索</button>
+          </div>
+          <div id="entriesList" class="list"></div>
+        </div>
+        <div class="card">
+          <h2>条目正文</h2>
+          <div id="entryDetail" class="sub">从左侧点击一条记忆查看正文与操作。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Inbox Panel -->
+    <section id="panel-inbox" class="panel">
+      <div class="card">
+        <h2>待确认记忆提案（写前已自动查重）</h2>
+        <div id="inboxList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- Propose Panel -->
+    <section id="panel-propose" class="panel">
+      <div class="card" style="max-width:720px;">
+        <h2>提交新记忆（自动查重后入 Inbox）</h2>
+        <div class="form-row"><label>标题</label><input id="pTitle" placeholder="例如：部署镜像必须指定 linux/amd64" /></div>
+        <div class="form-row" style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
+          <div><label>作用域</label><select id="pScope"><option value="project">project</option><option value="global">global</option><option value="handoff">handoff</option></select></div>
+          <div><label>类型</label><select id="pType"><option value="decision">decision</option><option value="skill">skill</option><option value="handoff">handoff</option><option value="user">user</option></select></div>
+          <div><label>热度 (salience)</label><select id="pSalience"><option value="1">1 (核心)</option><option value="2" selected>2 (正常)</option><option value="3">3 (冷门)</option></select></div>
+        </div>
+        <div class="form-row"><label>关键词（逗号分隔）</label><input id="pKeywords" placeholder="docker, amd64, 部署" /></div>
+        <div class="form-row"><label>正文内容 (Markdown)</label><textarea id="pContent" rows="5" placeholder="详细写清楚结论、原因和触发条件…"></textarea></div>
+        <button id="proposeSubmitBtn" class="primary">提交并查重</button>
+        <div id="proposeStatus" class="sub" style="margin-top:8px;"></div>
+      </div>
+    </section>
+
+    <!-- Soul Panel -->
+    <section id="panel-soul" class="panel">
+      <div class="card" style="max-width:720px;">
+        <h2>30 秒快速铸魂（写入全局 SOUL.md）</h2>
+        <div class="form-row"><label>Agent 名字</label><input id="sName" value="MemHub Partner" /></div>
+        <div class="form-row"><label>如何称呼你</label><input id="sUser" value="你" /></div>
+        <div class="form-row"><label>性格与表达风格</label><input id="sPersona" value="务实、坦诚、直接先给结论" /></div>
+        <div class="form-row"><label>硬性边界</label><input id="sBoundaries" value="修改生产数据或删除文件前必须明确确认" /></div>
+        <button id="soulSaveBtn" class="primary">保存到 ~/.memory/SOUL.md</button>
+        <div id="soulStatus" class="sub" style="margin-top:8px;"></div>
+        <h3 style="margin-top:16px; font-size:13.5px;">当前 SOUL.md 预览</h3>
+        <pre id="soulPreview">加载中…</pre>
+      </div>
+    </section>
+
+    <!-- Graph & Lint Panel -->
+    <section id="panel-graph" class="panel">
+      <div class="grid-2">
+        <div class="card">
+          <h2>记忆关系图谱（related / supersededBy / 互链）</h2>
+          <svg id="graphSvg" viewBox="0 0 640 420"></svg>
+        </div>
+        <div class="card">
+          <h2>健康体检报告 (Lint)</h2>
+          <div id="lintReport" class="list"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const q = sel => document.querySelector(sel);
+    let currentCwd = '';
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    async function loadHealthAndEntries() {
+      const qs = currentCwd ? `?cwd=${encodeURIComponent(currentCwd)}` : '';
+      const health = await api(`/api/health${qs}`);
+      q('#storeInfo').textContent = `全局库: ${health.globalDir} | 项目库: ${health.projectDir || '未关联'}`;
+      await Promise.all([loadEntries(), loadInbox(), loadBoot(), loadGraphAndLint()]);
+    }
+
+    async function loadEntries() {
+      const qs = new URLSearchParams();
+      if (currentCwd) qs.set('cwd', currentCwd);
+      const query = q('#searchInput').value.trim();
+      const scope = q('#scopeSelect').value;
+      if (query) {
+        qs.set('q', query);
+        if (scope) qs.set('scope', scope);
+        const data = await api(`/api/search?${qs}`);
+        renderEntryList(data.hits);
+      } else {
+        const data = await api(`/api/entries?${qs}`);
+        const list = scope ? data.entries.filter(e => e.scope === scope) : data.entries;
+        renderEntryList(list);
+      }
+    }
+
+    function renderEntryList(list) {
+      const el = q('#entriesList');
+      if (!list.length) {
+        el.innerHTML = '<div class="sub">暂无匹配的记忆条目。</div>';
+        return;
+      }
+      el.innerHTML = list.map(e => `
+        <div class="item" data-id="${esc(e.id)}">
+          <div><span class="pill ${esc(e.scope)}">${esc(e.scope)}</span><strong>${esc(e.title)}</strong></div>
+          <div class="meta">${esc(e.id)} · salience:${e.salience}${e.score ? ` · score:${e.score}` : ''}</div>
+          <div class="sub">${esc(e.summary)}</div>
+        </div>
+      `).join('');
+      el.querySelectorAll('.item').forEach(node => {
+        node.addEventListener('click', () => openEntry(node.dataset.id));
+      });
+    }
+
+    async function openEntry(id) {
+      const qs = new URLSearchParams({ id });
+      if (currentCwd) qs.set('cwd', currentCwd);
+      const e = await api(`/api/load?${qs}`);
+      q('#entryDetail').innerHTML = `
+        <div style="margin-bottom:8px;"><span class="pill ${esc(e.scope)}">${esc(e.scope)}</span><strong>${esc(e.title)}</strong></div>
+        <div class="meta" style="margin-bottom:8px;">ID: ${esc(e.id)} | 状态: ${esc(e.status)} | 最近访问: ${esc(e.last_access || '-')} | 路径: ${esc(e.relPath)}</div>
+        <pre>${esc(e.body)}</pre>
+        ${e.readOnly ? '<div class="sub">只读外部条目（specs / workflow）</div>' : `
+          <div style="display:flex; gap:8px; margin-top:10px;">
+            <button data-forget="deprecate">标为废弃 (deprecate)</button>
+            <button data-forget="archive">归档 (archive)</button>
+            <button class="danger" data-forget="delete">物理删除</button>
+          </div>
+        `}
+      `;
+      q('#entryDetail').querySelectorAll('[data-forget]').forEach(btn => {
+        btn.addEventListener('click', () => forgetItem(e.id, btn.dataset.forget));
+      });
+    }
+
+    async function forgetItem(id, mode) {
+      const confirmed = mode !== 'delete' || window.confirm(`确定要物理删除 ${id} 吗？此操作不可恢复。`);
+      if (!confirmed) return;
+      await api('/api/forget', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: currentCwd, id, mode, reason: 'WebUI 操作', confirm: mode === 'delete' }),
+      });
+      q('#entryDetail').textContent = `已执行 ${mode}: ${id}`;
+      await loadHealthAndEntries();
+    }
+
+    async function loadInbox() {
+      const qs = currentCwd ? `?cwd=${encodeURIComponent(currentCwd)}` : '';
+      const data = await api(`/api/inbox${qs}`);
+      q('#inboxCount').textContent = data.batches.length;
+      const el = q('#inboxList');
+      if (!data.batches.length) {
+        el.innerHTML = '<div class="sub">当前没有待审批的记忆提案。</div>';
+        return;
+      }
+      el.innerHTML = data.batches.map(b => `
+        <div class="item" style="cursor:default;">
+          <div class="meta">批次 ${esc(b.id)} · 来源 ${esc(b.agent)} · ${esc(b.createdAt)}</div>
+          ${b.items.map(it => `
+            <div style="margin-top:8px; padding-top:8px; border-top:1px dashed var(--border);">
+              <div><span class="pill ${esc(it.item.scope)}">${esc(it.item.scope)}</span><strong>${esc(it.item.title)}</strong></div>
+              <div class="sub" style="margin:4px 0;">${esc(it.item.content.slice(0, 180))}</div>
+              ${it.similar.length ? `<div class="meta">相似条目: ${it.similar.map(s => `${esc(s.id)}(${esc(s.title)})`).join(' / ')}</div>` : '<div class="meta">无相似条目</div>'}
+              <div style="margin-top:6px;">
+                <select class="decision-select" data-batch="${esc(b.id)}" data-key="${esc(it.key)}">
+                  <option value="create" ${it.suggestion.action === 'create' ? 'selected' : ''}>新建条目 (create)</option>
+                  ${it.similar[0] ? `<option value="supersede:${esc(it.similar[0].id)}" ${it.suggestion.action === 'supersede' ? 'selected' : ''}>替代旧条目 ${esc(it.similar[0].id)}</option>` : ''}
+                  ${it.similar[0] ? `<option value="both-hold:${esc(it.similar[0].id)}">与 ${esc(it.similar[0].id)} 条件并存</option>` : ''}
+                  <option value="duplicate" ${it.suggestion.action === 'duplicate' ? 'selected' : ''}>重复跳过 (duplicate)</option>
+                  <option value="reject">拒绝保存 (reject)</option>
+                </select>
+              </div>
+            </div>
+          `).join('')}
+          <div style="margin-top:10px;"><button class="primary" data-commit="${esc(b.id)}">确认提交此批次</button></div>
+        </div>
+      `).join('');
+      el.querySelectorAll('[data-commit]').forEach(btn => {
+        btn.addEventListener('click', () => commitBatch(btn.dataset.commit));
+      });
+    }
+
+    async function commitBatch(batchId) {
+      const decisions = {};
+      document.querySelectorAll('.decision-select').forEach(sel => {
+        if (sel.dataset.batch !== batchId) return;
+        const sep = sel.value.indexOf(':');
+        const action = sep === -1 ? sel.value : sel.value.slice(0, sep);
+        const targetId = sep === -1 ? null : sel.value.slice(sep + 1);
+        decisions[sel.dataset.key] = { action, targetId };
+      });
+      await api('/api/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: currentCwd, batchId, decisions }),
+      });
+      await loadHealthAndEntries();
+    }
+
+    async function loadBoot() {
+      const qs = currentCwd ? `?cwd=${encodeURIComponent(currentCwd)}` : '';
+      const boot = await api(`/api/boot${qs}`);
+      q('#soulPreview').textContent = boot.soul || '暂无 SOUL.md';
+    }
+
+    async function loadGraphAndLint() {
+      const qs = currentCwd ? `?cwd=${encodeURIComponent(currentCwd)}` : '';
+      const [graph, lint] = await Promise.all([api(`/api/graph${qs}`), api(`/api/lint${qs}`)]);
+      q('#lintReport').innerHTML = `
+        <div class="meta">总条目: ${lint.total} | 活跃: ${lint.active} | 待关注问题: ${lint.issues.length}</div>
+        ${lint.issues.length ? lint.issues.map(i => `<div class="item"><strong>[${esc(i.level)}]</strong> ${esc(i.message)}</div>`).join('') : '<div class="sub">记忆库状态健康，未发现断链或过期问题。</div>'}
+      `;
+      renderSvgGraph(graph);
+    }
+
+    function renderSvgGraph(graph) {
+      const svg = q('#graphSvg');
+      const nodes = graph.nodes.slice(0, 32);
+      if (!nodes.length) {
+        svg.innerHTML = '<text x="20" y="40" fill="#64748b" font-size="13">暂无记忆节点</text>';
+        return;
+      }
+      const pos = new Map();
+      const cx = 320, cy = 210, r = Math.min(165, 50 + nodes.length * 7);
+      nodes.forEach((n, idx) => {
+        const angle = (Math.PI * 2 * idx) / nodes.length;
+        pos.set(n.id, { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), node: n });
+      });
+      const edgesSvg = graph.edges.map(e => {
+        const a = pos.get(e.source), b = pos.get(e.target);
+        if (!a || !b) return '';
+        const stroke = e.kind === 'supersededBy' ? '#e11d48' : '#94a3b8';
+        return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${stroke}" stroke-width="1.5" stroke-dasharray="${e.kind === 'supersededBy' ? '4 3' : ''}" />`;
+      }).join('');
+      const nodesSvg = nodes.map(n => {
+        const p = pos.get(n.id);
+        const fill = n.scope === 'global' ? '#2563eb' : n.scope === 'handoff' ? '#d97706' : '#059669';
+        return `<g><circle cx="${p.x}" cy="${p.y}" r="8" fill="${fill}" /><text x="${p.x + 11}" y="${p.y + 4}" font-size="11" fill="#0f172a">${esc(n.title.slice(0, 14))}</text></g>`;
+      }).join('');
+      svg.innerHTML = edgesSvg + nodesSvg;
+    }
+
+    document.querySelectorAll('.tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        q('#panel-' + btn.dataset.panel).classList.add('active');
+      });
+    });
+
+    q('#refreshBtn').addEventListener('click', () => {
+      currentCwd = q('#cwdInput').value.trim();
+      loadHealthAndEntries();
+    });
+    q('#searchBtn').addEventListener('click', loadEntries);
+    q('#searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') loadEntries(); });
+
+    q('#proposeSubmitBtn').addEventListener('click', async () => {
+      const title = q('#pTitle').value.trim();
+      const content = q('#pContent').value.trim();
+      if (!title || !content) return;
+      const res = await api('/api/propose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cwd: currentCwd,
+          agent: 'web-ui',
+          requireReview: true,
+          items: [{
+            title,
+            content,
+            scope: q('#pScope').value,
+            type: q('#pType').value,
+            salience: Number(q('#pSalience').value),
+            keywords: q('#pKeywords').value.split(',').map(s => s.trim()).filter(Boolean),
+          }],
+        }),
+      });
+      q('#proposeStatus').textContent = `已进入 Inbox 批次: ${res.batchId}，请切换至“待审批 Inbox”确认写入。`;
+      await loadInbox();
+    });
+
+    q('#soulSaveBtn').addEventListener('click', async () => {
+      await api('/api/soul', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cwd: currentCwd,
+          agentName: q('#sName').value,
+          userAddress: q('#sUser').value,
+          persona: q('#sPersona').value,
+          boundaries: q('#sBoundaries').value,
+        }),
+      });
+      q('#soulStatus').textContent = '已保存 SOUL.md';
+      await loadBoot();
+    });
+
+    loadHealthAndEntries().catch(err => {
+      q('#storeInfo').textContent = `连接失败: ${err.message}`;
+    });
+  </script>
+</body>
+</html>

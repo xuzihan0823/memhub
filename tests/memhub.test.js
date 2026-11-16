@@ -138,7 +138,7 @@ test('daemon + web-ui + mcp-server: end-to-end HTTP and JSON-RPC 2.0', async () 
     assert.equal(initRpc.result.serverInfo.name, 'memhub');
 
     const listRpc = await processRpcMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { homeDir, globalDir, cwd: repoDir });
-    assert.equal(listRpc.result.tools.length, 5);
+    assert.deepEqual(listRpc.result.tools.filter(tool => tool.name.startsWith('memory_session_')).map(tool => tool.name).sort(), ['memory_session_capture', 'memory_session_list', 'memory_session_load', 'memory_session_restore', 'memory_session_status']);
 
     const bootRpc = await processRpcMessage({
       jsonrpc: '2.0',
@@ -908,14 +908,14 @@ test('review: pi-desktop reviews buffered runs every N user turns and on shutdow
         { role: 'assistant', content: [{ type: 'text', text: '收到' }] },
       ] });
 
-      assert.equal(onAgentEnd(turn(1), ctx), undefined);
+      assert.equal(await onAgentEnd(turn(1), ctx), undefined);
       assert.equal(calls.length, 0);
-      onAgentEnd(turn(2), ctx);
+      await onAgentEnd(turn(2), ctx);
       await new Promise(r => setTimeout(r, 50));
       assert.equal(calls.length, 1);
       assert.match(calls[0].body.messages[1].content, /smoke 测试 1[\s\S]*smoke 测试 2/);
 
-      onAgentEnd(turn(3), ctx);
+      await onAgentEnd(turn(3), ctx);
       await onAgentEnd({}, ctx, { force: true });
       assert.equal(calls.length, 2);
       const stores = core.resolveStores({ globalDir, cwd: repoDir });
@@ -974,5 +974,66 @@ test('model config: file works without shell exports and environment overrides i
     assert.equal(core.reviewConfig({ ...env, ...REVIEW_ENV }).model, 'small');
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('adapter: project progress targets another workspace and updates only its handoff', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  const targetDir = path.join(base, 'target');
+  const otherDir = path.join(base, 'other');
+  await fsp.mkdir(path.join(targetDir, '.git'), { recursive: true });
+  await fsp.mkdir(path.join(otherDir, '.git'), { recursive: true });
+  try {
+    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir }, async () => {
+      const { tools } = require('../adapters/pi-desktop/main')._internals;
+      const ctx = { cwd: repoDir, sessionId: 'cross-project-test' };
+      const progress = content => ({ scope: 'handoff', task: 'project-status', title: '项目当前进度', content });
+      const first = await tools.propose({ cwd: targetDir, items: [progress('进入动作细调阶段')] }, ctx);
+      assert.equal(first.committed[0].rootDir, path.join(targetDir, '.memory'));
+      assert.equal(fs.existsSync(path.join(repoDir, '.memory')), false);
+      const second = await tools.propose({ cwd: targetDir, items: [progress('继续细调，翻页动作已完成')] }, ctx);
+      assert.equal(second.committed[0].action, 'update');
+      assert.equal(second.committed[0].id, first.committed[0].id);
+      await tools.propose({ cwd: otherDir, items: [progress('已公开仓库并宣传')] }, ctx);
+
+      const stores = cwd => core.resolveStores({ homeDir, globalDir, cwd });
+      const targetEntries = await core.loadAllEntries(stores(targetDir));
+      assert.equal(targetEntries.filter(e => e.scope === 'handoff').length, 1);
+      assert.equal(targetEntries.filter(e => e.scope === 'global').length, 0);
+      assert.match((await tools.load({ cwd: targetDir, id: first.committed[0].id }, ctx)).content, /翻页动作已完成/);
+      assert.equal((await tools.search({ cwd: targetDir, query: '翻页动作' }, ctx)).hits[0].scope, 'handoff');
+      assert.match(core.renderBootBlock(await core.bootContext(stores(targetDir))), /翻页动作已完成/);
+      assert.doesNotMatch(core.renderBootBlock(await core.bootContext(stores(repoDir))), /翻页动作已完成|已公开仓库并宣传/);
+      assert.doesNotMatch(core.renderBootBlock(await core.bootContext(stores(otherDir))), /翻页动作已完成/);
+
+      await tools.propose({ items: [{ ...progress('当前会话的进度'), paths: [targetDir] }] }, ctx);
+      assert.match((await core.loadAllEntries(stores(repoDir))).find(e => e.scope === 'handoff').body, /当前会话的进度/);
+      assert.equal((await core.loadAllEntries(stores(targetDir))).filter(e => e.scope === 'handoff').length, 1);
+      await assert.rejects(tools.propose({ cwd: 'target', items: [progress('错误目录')] }, ctx), /absolute path/);
+      await assert.rejects(tools.propose({ cwd: path.join(base, 'missing'), items: [progress('错误目录')] }, ctx), /existing project directory/);
+      const emptyDir = path.join(base, 'empty');
+      await fsp.mkdir(emptyDir);
+      await assert.rejects(tools.propose({ cwd: emptyDir, items: [progress('错误目录')] }, ctx), /does not identify a project/);
+      assert.equal(fs.existsSync(path.join(emptyDir, '.memory')), false);
+
+      await tools.forget({ cwd: targetDir, id: first.committed[0].id, mode: 'deprecate', reason: '测试结束' }, ctx);
+      assert.equal((await tools.load({ cwd: targetDir, id: first.committed[0].id }, ctx)).status, 'deprecated');
+      assert.equal((await core.loadAllEntries(stores(otherDir))).find(e => e.scope === 'handoff').status, 'active');
+    });
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('protocol: project progress uses targeted handoffs rather than global long-term memory', () => {
+  const protocol = core.renderProtocol();
+  assert.match(protocol, /最新进度.*不属于长期记忆/);
+  assert.match(protocol, /task="project-status"/);
+  assert.match(protocol, /cwd 参数决定目标项目/);
+  assert.match(protocol, /未提供.*不要编造/);
+  const review = core.buildReviewMessages('PocketWorld 进入动作细调阶段', [])[0].content;
+  assert.match(review, /应由前台助手写入目标项目的短期交接/);
+  for (const tool of require('../adapters/pi-desktop/manifest.json').contributes.agentTools) {
+    assert.equal(tool.schema.properties.cwd.type, 'string');
   }
 });

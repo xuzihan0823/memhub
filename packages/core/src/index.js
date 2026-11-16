@@ -8,4 +8,6 @@ module.exports = {
   ...require('./rerank'),
   ...require('./retrieve'),
   ...require('./review'),
+  ...require('./sessions'),
+  ...require('./session-api'),
 };

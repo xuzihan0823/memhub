@@ -115,7 +115,7 @@ async function assertNoSymlinks(rootReal, parts, { missingOk = false } = {}) {
   return true;
 }
 
-async function safeReadText(rootDir, relPath) {
+async function safeReadText(rootDir, relPath, { maxBytes = MAX_FILE_BYTES } = {}) {
   const rootReal = await fsp.realpath(rootDir);
   const parts = validateRelPath(relPath);
   await assertNoSymlinks(rootReal, parts);
@@ -129,7 +129,7 @@ async function safeReadText(rootDir, relPath) {
   }
   try {
     const [opened, named] = await Promise.all([handle.stat(), fsp.stat(full)]);
-    if (!opened.isFile() || opened.nlink > 1 || opened.size > MAX_FILE_BYTES) {
+    if (!opened.isFile() || opened.nlink > 1 || opened.size > maxBytes) {
       throw new Error(`Unsupported or oversized memory file: ${relPath}`);
     }
     if (opened.ino !== named.ino || opened.dev !== named.dev) {

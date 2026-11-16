@@ -14,7 +14,7 @@ function readModelSettings(env, prefix) {
     const file = path.join(root, 'config.json');
     if (fs.statSync(file).size > 64 * 1024) return {};
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const section = settings?.[prefix === 'MEMHUB_REVIEW' ? 'review' : 'rerank'];
+    const section = settings?.[{ MEMHUB_REVIEW: 'review', MEMHUB_RERANK: 'rerank', MEMHUB_SUMMARY: 'summary' }[prefix]];
     return section && typeof section === 'object' && !Array.isArray(section) ? section : {};
   } catch {
     return {};

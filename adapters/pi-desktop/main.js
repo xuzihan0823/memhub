@@ -18,7 +18,16 @@ function loadLocalCore() {
 
 const core = loadLocalCore();
 
-async function resolveCwd(ctx) {
+async function resolveCwd(ctx, targetCwd) {
+  if (targetCwd !== undefined) {
+    if (typeof targetCwd !== 'string' || !path.isAbsolute(targetCwd) || !fs.existsSync(targetCwd) || !fs.statSync(targetCwd).isDirectory()) {
+      throw new Error('cwd must be an absolute path to an existing project directory');
+    }
+    if (core && !core.resolveStores({ cwd: targetCwd }).projectDir) {
+      throw new Error('cwd does not identify a project; verify the target directory before writing project progress');
+    }
+    return targetCwd;
+  }
   if (typeof ctx?.cwd === 'string' && ctx.cwd) return ctx.cwd;
   try {
     const workspace = await pi.workspace.get();
@@ -47,7 +56,7 @@ const clampLimit = value => (Number.isInteger(value) ? Math.min(Math.max(value, 
 
 const tools = {
   search: async (args, ctx) => {
-    const cwd = await resolveCwd(ctx);
+    const cwd = await resolveCwd(ctx, args?.cwd);
     const query = String(args?.query || '');
     if (core) {
       const entries = await core.loadAllEntries(core.resolveStores({ cwd }));
@@ -61,7 +70,7 @@ const tools = {
     return callDaemon(`/api/search?${qs}`);
   },
   load: async (args, ctx) => {
-    const cwd = await resolveCwd(ctx);
+    const cwd = await resolveCwd(ctx, args?.cwd);
     const id = String(args?.id || '');
     if (core) {
       const entry = await core.loadEntryById(core.resolveStores({ cwd }), id, { touchAccess: true });
@@ -73,7 +82,7 @@ const tools = {
     return callDaemon(`/api/load?${qs}`);
   },
   propose: async (args, ctx) => {
-    const cwd = await resolveCwd(ctx);
+    const cwd = await resolveCwd(ctx, args?.cwd);
     const sessionId = ctx?.sessionId || null;
     if (core) {
       return core.proposeMemory(core.resolveStores({ cwd }), { items: args?.items, agent: AGENT, sessionId, requireReview: Boolean(args?.requireReview) });
@@ -81,12 +90,22 @@ const tools = {
     return callDaemon('/api/propose', { method: 'POST', body: { cwd, agent: AGENT, sessionId, items: args?.items, requireReview: Boolean(args?.requireReview) } });
   },
   forget: async (args, ctx) => {
-    const cwd = await resolveCwd(ctx);
+    const cwd = await resolveCwd(ctx, args?.cwd);
     const params = { id: String(args?.id || ''), mode: args?.mode || 'deprecate', reason: args?.reason || '', confirm: Boolean(args?.confirm) };
     if (core) return core.forgetEntry(core.resolveStores({ cwd }), params);
     return callDaemon('/api/forget', { method: 'POST', body: { cwd, ...params } });
   },
 };
+
+if (core) {
+  for (const definition of core.SESSION_TOOLS) {
+    const name = definition.name.replace(/^memory_/, '');
+    tools[name] = async (args, ctx) => {
+      const cwd = args?.cwd || ctx?.cwd;
+      return core.handleSessionTool(name, core.resolveStores({ cwd }), args || {});
+    };
+  }
+}
 
 const registered = [];
 

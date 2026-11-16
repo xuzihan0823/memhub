@@ -85,6 +85,27 @@ async function main() {
     return;
   }
 
+  if (cmd === 'session') {
+    const stores = core.resolveStores({ cwd: flags.cwd || process.cwd() });
+    const action = positional[1] || 'status';
+    let input = {};
+    if (['capture', 'restore'].includes(action)) input = JSON.parse(await readStdinText() || '{}');
+    Object.assign(input, {
+      ...(flags.key ? { session_key: flags.key } : {}),
+      ...(flags.agent ? { origin_agent: flags.agent } : {}),
+      ...(flags.session ? { source_session_id: flags.session } : {}),
+      ...(flags.from ? { from_seq: Number(flags.from) } : {}),
+      ...(flags.to ? { to_seq: Number(flags.to) } : {}),
+      ...(flags['workspace-root'] ? { workspace_root: flags['workspace-root'] } : {}),
+      ...(flags['workspace-roots'] ? { workspace_roots: JSON.parse(flags['workspace-roots']) } : {}),
+      ...(flags['cross-workspace'] ? { cross_workspace: true } : {}),
+    });
+    const handler = action === 'summarize' ? core.summarizeSession : action === 'rebuild' ? core.rebuildSessionLocations : (target, args) => core.handleSessionTool(`session_${action}`, target, args);
+    const result = await handler(stores, input);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   if (cmd === 'init' || cmd === 'setup') {
     const dryRun = Boolean(flags['dry-run']);
     const stores = core.resolveStores({ cwd: flags.cwd || process.cwd() });
@@ -125,6 +146,7 @@ async function main() {
       projectDir: stores.projectDir,
       projectExists: Boolean(stores.projectDir && fs.existsSync(stores.projectDir)),
       lint,
+      sessions: await core.sessionDiagnostics(stores),
       agents: detected.map(a => ({ id: a.id, name: a.name, installed: a.installed, configExists: a.configExists })),
     }, null, 2));
     return;
@@ -181,6 +203,7 @@ async function main() {
     '  memhub mcp                                          启动标准 stdio MCP Server',
     '  memhub hook <host> --event <Event>                  各宿主 Hook 桥接入口',
     '  memhub search <query>                               检索全局与当前项目记忆',
+    '  memhub session list|load|status|capture|restore|summarize|rebuild [--key KEY] [--cwd DIR]',
     '  memhub inbox / commit <batchId>                     查看或确认待审提案',
     '  memhub review --transcript <jsonl>                  复盘一段 Claude Code 对话，候选记忆进入 inbox',
     '  memhub lint / doctor / uninstall                    体检、诊断与无损卸载',

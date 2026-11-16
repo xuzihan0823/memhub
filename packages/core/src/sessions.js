@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { safeReadText, atomicWriteText, withStoreTransaction } = require('./fs-safe');
+const { safeReadText, atomicWriteText, safeRemove, withStoreTransaction } = require('./fs-safe');
 const { serializeEntry } = require('./markdown');
 const { redactSecrets, resolveStores } = require('./store');
 const { modelConfig, chatCompletion } = require('./rerank');
@@ -16,12 +16,20 @@ const escapeTags = text => String(text).replace(/<(\/?)(memory-[\w-]+)/gi, '＜$
 const read = (root, rel) => safeReadText(root, rel, { maxBytes: Infinity });
 const now = () => new Date().toISOString();
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 function sessionConfig(stores, env = process.env) {
   let settings = {};
   try { settings = JSON.parse(fs.readFileSync(path.join(stores.globalDir, 'config.json'), 'utf8')).sessions || {}; } catch {}
   const enabled = env.MEMHUB_SESSIONS_ENABLED;
-  return { enabled: enabled === undefined ? settings.enabled !== false : !['0', 'false'].includes(enabled) };
+  const retention = Number(env.MEMHUB_SESSIONS_RETENTION_DAYS ?? settings.retentionDays ?? 90);
+  return {
+    enabled: enabled === undefined ? settings.enabled !== false : !['0', 'false'].includes(enabled),
+    retentionDays: Number.isFinite(retention) && retention > 0 ? retention : 90,
+  };
 }
+
+const isExpired = (meta, retentionDays, now = Date.now()) => now - Date.parse(meta.updated_at) > retentionDays * DAY_MS;
 
 function sessionIdentity(stores, { origin_agent, source_session_id } = {}) {
   if (!origin_agent || !source_session_id) throw new Error('origin_agent and source_session_id are required');
@@ -245,7 +253,8 @@ async function restoreSessionContext(stores, input = {}) {
   const identity = sessionIdentity(stores, input);
   await captureSession(stores, { ...input, messages: [] });
   const root = sessionRoot(stores);
-  const candidates = (await listSessions(stores, { limit: 200 })).filter(r => r.session_key !== identity.session_key && r.last_seq > 0);
+  const { retentionDays } = sessionConfig(stores);
+  const candidates = (await listSessions(stores, { limit: 200 })).filter(r => r.session_key !== identity.session_key && r.last_seq > 0 && !isExpired(r, retentionDays));
   const sources = await withStoreTransaction(root, async () => {
     const current = await readRecord(root, identity.session_key);
     if (!current.meta.restore_selected) {
@@ -343,11 +352,35 @@ async function rebuildSessionLocations(stores, { workspace_roots = [] } = {}) {
   });
 }
 
-async function sessionDiagnostics(stores) {
-  const records = await listSessions(stores, { include_subagents: true, limit: 200 });
-  let index = 'missing';
-  try { JSON.parse(await read(path.join(stores.globalDir, 'state'), 'session-locations.json')); index = 'readable'; } catch (e) { if (e.code !== 'ENOENT') index = 'unavailable'; }
-  return { capture_enabled: sessionConfig(stores).enabled, summary_configured: Boolean(summaryConfig(stores)), workspace_root: stores.projectRoot || stores.cwd, index, host_hooks: 'not-verified-by-core', sessions: records.map(({ root, ...meta }) => ({ ...meta, uncovered_messages: meta.last_seq - meta.summary_through_seq })) };
+async function pruneSessions(stores, { older_than_days, confirm = false, now = Date.now() } = {}) {
+  const days = Number(older_than_days ?? sessionConfig(stores).retentionDays);
+  if (!Number.isFinite(days) || days <= 0) throw new Error('older_than_days must be a positive number');
+  const root = sessionRoot(stores);
+  const expired = (await localRecords(root)).filter(r => isExpired(r, days, now));
+  const sizeOf = key => ['turns.jsonl', 'session.md'].reduce((sum, f) => { try { return sum + fs.statSync(path.join(root, key, f)).size; } catch { return sum; } }, 0);
+  const candidates = expired.map(r => ({ session_key: r.session_key, origin_agent: r.origin_agent, updated_at: r.updated_at, last_seq: r.last_seq, bytes: sizeOf(r.session_key) }));
+  const summary = { older_than_days: days, workspace_root: stores.projectRoot || stores.cwd, count: candidates.length, bytes: candidates.reduce((s, c) => s + c.bytes, 0), sessions: candidates };
+  if (!confirm || !candidates.length) return { status: confirm ? 'nothing-to-delete' : 'preview', ...summary };
+  const deleted = [];
+  await withStoreTransaction(root, async () => {
+    for (const c of candidates) {
+      const meta = (await readRecord(root, c.session_key)).meta;
+      if (!isExpired(meta, days, now)) continue;
+      for (const f of ['turns.jsonl', 'session.md']) await safeRemove(root, `${c.session_key}/${f}`).catch(e => { if (e.code !== 'ENOENT') throw e; });
+      await fsp.rmdir(path.join(root, c.session_key));
+      deleted.push(c.session_key);
+    }
+  });
+  try { await rebuildSessionLocations(stores); } catch {}
+  return { status: 'deleted', ...summary, deleted };
 }
 
-module.exports = { sessionConfig, sessionIdentity, normalizeSessionMessages, captureSession, listSessions, loadSession, restoreSessionContext, summarizeSession, summaryConfig, sessionDiagnostics, rebuildSessionLocations };
+async function sessionDiagnostics(stores) {
+  const records = await listSessions(stores, { include_subagents: true, limit: 200 });
+  const { enabled, retentionDays } = sessionConfig(stores);
+  let index = 'missing';
+  try { JSON.parse(await read(path.join(stores.globalDir, 'state'), 'session-locations.json')); index = 'readable'; } catch (e) { if (e.code !== 'ENOENT') index = 'unavailable'; }
+  return { capture_enabled: enabled, retention_days: retentionDays, expired_sessions: records.filter(r => isExpired(r, retentionDays)).length, summary_configured: Boolean(summaryConfig(stores)), workspace_root: stores.projectRoot || stores.cwd, index, host_hooks: 'not-verified-by-core', sessions: records.map(({ root, ...meta }) => ({ ...meta, expired: isExpired(meta, retentionDays), uncovered_messages: meta.last_seq - meta.summary_through_seq })) };
+}
+
+module.exports = { sessionConfig, sessionIdentity, normalizeSessionMessages, captureSession, listSessions, loadSession, restoreSessionContext, summarizeSession, summaryConfig, sessionDiagnostics, rebuildSessionLocations, pruneSessions };

@@ -306,3 +306,39 @@ test('sessions: PI-shaped turns save each message once, upgrade provisional user
   assert.doesNotMatch(tool, /输出结尾/);
   assert.equal(record.meta.collection_gap, undefined);
 });
+
+test('sessions: 90-day retention excludes stale sessions from restore; prune previews and deletes only with confirm', async t => {
+  const { stores, cwd } = await fixture(t);
+  const old = await core.captureSession(stores, { ...identity('old'), messages: [user('o1', '很久以前的话')] });
+  const fresh = await core.captureSession(stores, { ...identity('fresh'), messages: [user('f1', '最近的话')] });
+  const journal = path.join(path.dirname(old.path), 'turns.jsonl');
+  const lines = (await fs.readFile(journal, 'utf8')).trimEnd().split('\n');
+  const header = JSON.parse(lines[0]);
+  header.meta.updated_at = new Date(Date.now() - 91 * 24 * 3600 * 1000).toISOString();
+  await fs.writeFile(journal, [JSON.stringify(header), ...lines.slice(1)].join('\n') + '\n');
+
+  assert.equal(core.sessionConfig(stores, {}).retentionDays, 90);
+  const status = await core.sessionDiagnostics(stores);
+  assert.equal(status.retention_days, 90);
+  assert.equal(status.expired_sessions, 1);
+  await core.captureSession(stores, { ...identity('fresh'), messages: [] });
+  const restored = await core.restoreSessionContext(stores, identity('next'));
+  assert.deepEqual(restored.sources, [fresh.session_key]);
+
+  await fs.writeFile(journal, [JSON.stringify({ ...header, meta: { ...header.meta, updated_at: new Date(Date.now() - 91 * 24 * 3600 * 1000).toISOString() } }), ...lines.slice(1)].join('\n') + '\n');
+  const preview = await core.pruneSessions(stores);
+  assert.equal(preview.status, 'preview');
+  assert.deepEqual(preview.sessions.map(s => s.session_key), [old.session_key]);
+  assert.ok(preview.bytes > 0);
+  await fs.access(journal);
+
+  const cli = spawnSync(process.execPath, ['packages/cli/bin/memhub.js', 'session', 'prune', '--cwd', cwd, '--older-than', '90d', '--confirm'], { encoding: 'utf8', env: { ...process.env, MEMHUB_GLOBAL_DIR: stores.globalDir } });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(JSON.parse(cli.stdout).deleted, [old.session_key]);
+  await assert.rejects(fs.access(path.dirname(old.path)), { code: 'ENOENT' });
+  assert.equal((await core.loadSession(stores, { session_key: fresh.session_key })).messages[0].text, '最近的话');
+  const index = JSON.parse(await fs.readFile(path.join(stores.globalDir, 'state/session-locations.json'), 'utf8'));
+  assert.equal(index[old.session_key], undefined);
+  assert.equal((await core.pruneSessions(stores, { confirm: true })).status, 'nothing-to-delete');
+  assert.equal(core.sessionConfig(stores, { MEMHUB_SESSIONS_RETENTION_DAYS: '30' }).retentionDays, 30);
+});

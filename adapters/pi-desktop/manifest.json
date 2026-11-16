@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "memhub.universal-memory",
   "name": "MemHub Universal Memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Shared local memory with per-turn conversation capture, previous-session restore, independent optional summaries, and memory/session tools. Requires bundled core for automatic conversation capture.",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
   "safetyNotes": "Reads and writes local memory and redacted conversation journals (~/.memory and <project>/.memory). Sessions are excluded from Git and are never automatically deleted. Optional model endpoints use config.json review/rerank/summary sections or MEMHUB_REVIEW_* / MEMHUB_RERANK_* / MEMHUB_SUMMARY_*. Summary calls send redacted dialogue to the separately configured endpoint and save automatically; long-term review candidates still require Inbox approval. Physical deletion requires confirm=true.",
   "contributes": {
     "agentExtensions": [
-      "extension.js"
+      "extension-0.3.1.js"
     ],
     "agentTools": [
       {

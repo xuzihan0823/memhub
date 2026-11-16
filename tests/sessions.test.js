@@ -250,3 +250,26 @@ test('sessions: independent CLI processes preserve all concurrent messages and i
   assert.equal(record.meta.last_seq, 4);
   assert.equal(new Set(record.messages.map(m => m.message_key)).size, 4);
 });
+
+test('PI session tools: invocation context without cwd falls back to workspace and reports missing workspace', async t => {
+  const { stores, cwd, base } = await fixture(t);
+  const previousPi = global.pi;
+  const previousGlobal = process.env.MEMHUB_GLOBAL_DIR;
+  process.env.MEMHUB_GLOBAL_DIR = stores.globalDir;
+  t.after(() => {
+    global.pi = previousPi;
+    if (previousGlobal === undefined) delete process.env.MEMHUB_GLOBAL_DIR;
+    else process.env.MEMHUB_GLOBAL_DIR = previousGlobal;
+  });
+  const { tools } = require('../adapters/pi-desktop/main')._internals;
+  global.pi = { workspace: { get: async () => ({ path: cwd }) } };
+  const result = await tools.session_status({}, { sessionId: 'tool-context' });
+  assert.equal(result.workspace_root, cwd);
+  assert.deepEqual(await tools.session_list({}, { sessionId: 'tool-context' }), []);
+  const nonproject = path.join(base, 'daily');
+  await fs.mkdir(nonproject);
+  assert.equal((await tools.session_status({ cwd: nonproject }, {})).workspace_root, nonproject);
+  global.pi = { workspace: { get: async () => ({}) } };
+  await assert.rejects(tools.session_status({}, { sessionId: 'tool-context' }), /workspace is unavailable; pass cwd/);
+  await assert.rejects(tools.session_status({ cwd: 'relative' }, {}), /cwd must be an absolute path/);
+});

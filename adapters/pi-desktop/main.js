@@ -7,7 +7,7 @@ const DEFAULT_BASE = 'http://127.0.0.1:4789';
 const AGENT = 'pi-desktop';
 
 function loadLocalCore() {
-  for (const rel of ['./core/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.1/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}
@@ -18,12 +18,12 @@ function loadLocalCore() {
 
 const core = loadLocalCore();
 
-async function resolveCwd(ctx, targetCwd) {
+async function resolveCwd(ctx, targetCwd, { requireProject = true } = {}) {
   if (targetCwd !== undefined) {
     if (typeof targetCwd !== 'string' || !path.isAbsolute(targetCwd) || !fs.existsSync(targetCwd) || !fs.statSync(targetCwd).isDirectory()) {
       throw new Error('cwd must be an absolute path to an existing project directory');
     }
-    if (core && !core.resolveStores({ cwd: targetCwd }).projectDir) {
+    if (requireProject && core && !core.resolveStores({ cwd: targetCwd }).projectDir) {
       throw new Error('cwd does not identify a project; verify the target directory before writing project progress');
     }
     return targetCwd;
@@ -101,7 +101,8 @@ if (core) {
   for (const definition of core.SESSION_TOOLS) {
     const name = definition.name.replace(/^memory_/, '');
     tools[name] = async (args, ctx) => {
-      const cwd = args?.cwd || ctx?.cwd;
+      const cwd = await resolveCwd(ctx, args?.cwd, { requireProject: false });
+      if (!cwd) throw new Error('Current workspace is unavailable; pass cwd explicitly to the session tool');
       return core.handleSessionTool(name, core.resolveStores({ cwd }), args || {});
     };
   }

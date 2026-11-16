@@ -2,6 +2,8 @@
 
 状态：设计第 1–3 步已具备核心实现和 PI 扩展事件测试；真实 PI 桌面端双窗口验收未执行，整套跨宿主方案尚未完成。插件版本 0.3.0，测试环境 Node.js v24.14.1（macOS）。没有修改本机宿主配置，没有批量导入既有聊天。
 
+当前修复版为 0.3.1：已复现并规避 PI 0.22.0 的同路径扩展缓存，修复会话工具缺少 cwd 时的工作区回退；使用真实宿主加载器的隔离测试后，共 43 项通过。下面保留首阶段原始验证记录，新增验证见文末。实际桌面安装与双窗口验收仍待执行。
+
 ## 已实现
 
 - 统一 `captureSession`、`restoreSessionContext`、`listSessions`、`loadSession`、`summarizeSession`，以及 `sessionDiagnostics`、`rebuildSessionLocations`。
@@ -45,3 +47,13 @@
 - [ ] Cursor / Pi CLI / DSH：当前仅有 MCP 主动会话接口或文件兼容，自动采集能力需按实际宿主接口核实。既有历史导入需明确操作，不自动批量执行。
 
 这些未勾选项是原设计后续交付与真实宿主验收项，不能将本记录解读为整套方案已通过。
+
+## 0.3.1：升级缓存与工作区诊断修复
+
+实机检查：PI-Desktop 0.22.0，插件管理记录显示 0.3.0 已启用，但目标工作区无 sessions 记录；调用会话状态工具出现 `lstat '/null'`。插件工具调用上下文实际提供 sessionId、turnId 等字段，不包含 cwd；会话工具遗漏了原有 `pi.workspace.get()` 回退。此项已修复，非项目目录也可显式选择；工作区仍不可用时给出明确错误。
+
+直接调用该版本宿主的 `TrustedExtensionRunner`，可复现按入口路径缓存扩展工厂的行为：同路径覆盖后重新创建 runner，依然执行旧模块；只新建转发包装也会继续命中旧依赖。0.3.1 将实际实现改为 `extension-0.3.1.js`，bundled core 改为 `core/0.3.1/src/`，CLI 安装同步复制 manifest 声明的入口与版本化核心。`extension.js` 只作为仓库引用的兼容入口，manifest 不再使用它。
+
+验证命令：`MEMHUB_PI_RUNNER=<ABSOLUTE_PATH_TO_HOST_RUNNER_JS> npm test`，43/43 通过。集成测试先保留旧工厂与旧核心路径缓存，再加载新路径：A 的用户消息和助手回复保存到 #2，B 恢复 A 的原话，宿主 diagnostics 为空。未配置该环境变量时，正常测试执行 42 项，该宿主集成项跳过。没有修改宿主源码、运行中的插件或用户聊天数据。
+
+新版安装包：`build/pi-desktop-0.3.1/dist/memhub.universal-memory-0.3.1.piplug`，15 文件，SHA-256：`4cb7572eaa04ecb09f1c9ba7375f465f44ca981ef95f1ca01d8774486e4a24eb`。PluginCheck 与 PluginPack 通过；权限与 0.3.0 一致。用户安装新版后，还需确认实际桌面进程使用了新入口，并检查 sessions 保存序号和新会话恢复来源；加载器测试不替代这项验收。

@@ -273,3 +273,36 @@ test('PI session tools: invocation context without cwd falls back to workspace a
   await assert.rejects(tools.session_status({}, { sessionId: 'tool-context' }), /workspace is unavailable; pass cwd/);
   await assert.rejects(tools.session_status({ cwd: 'relative' }, {}), /cwd must be an absolute path/);
 });
+
+test('sessions: PI-shaped turns save each message once, upgrade provisional user text and compact long tool output', async t => {
+  const { stores, cwd } = await fixture(t);
+  const previous = process.env.MEMHUB_GLOBAL_DIR;
+  process.env.MEMHUB_GLOBAL_DIR = stores.globalDir;
+  t.after(() => { if (previous === undefined) delete process.env.MEMHUB_GLOBAL_DIR; else process.env.MEMHUB_GLOBAL_DIR = previous; });
+  const extension = require('../adapters/pi-desktop/extension')._internals;
+  const ctx = { cwd, sessionId: 'pi-shape' };
+  const longOutput = `输出开头 ${'x'.repeat(20000)} 输出结尾`;
+  const history = [{ role: 'user', content: '第一轮' }];
+  await extension.onProviderRequest({ payload: { messages: history } }, ctx);
+  const turnEnd = [
+    { role: 'user', content: '第一轮', timestamp: 1700000000000 },
+    { role: 'assistant', content: [{ type: 'text', text: '先跑命令' }, { type: 'toolCall', name: 'Bash', arguments: { command: 'npm test' } }], timestamp: 1700000001000 },
+    { role: 'toolResult', toolName: 'Bash', isError: true, content: [{ type: 'text', text: longOutput }], timestamp: 1700000002000 },
+    { role: 'assistant', content: [{ type: 'text', text: '命令失败' }], timestamp: 1700000003000 },
+  ];
+  await extension.onProviderRequest({ payload: { messages: [...history, { role: 'assistant', content: '先跑命令' }, { role: 'user', content: [{ type: 'tool_result', content: longOutput }] }] } }, ctx);
+  await extension.onAgentEnd({ messages: turnEnd }, ctx);
+  await extension.onAgentEnd({ messages: turnEnd }, ctx);
+  await extension.onProviderRequest({ payload: { messages: [...history, { role: 'assistant', content: '命令失败' }, { role: 'user', content: '第一轮' }] } }, ctx);
+  const [row] = (await core.listSessions(stores)).filter(r => r.source_session_id === 'pi-shape');
+  const record = await core.loadSession(stores, { session_key: row.session_key });
+  assert.deepEqual(record.messages.map(m => `${m.role}/${m.type}`), ['user/message', 'assistant/message', 'tool/tool_call', 'tool/tool_result', 'assistant/message', 'user/message']);
+  assert.ok(record.messages.slice(0, 5).every(m => m.stable_key));
+  assert.equal(record.messages[5].provisional, true);
+  const tool = record.messages[3].text;
+  assert.match(tool, /^\[工具结果 Bash · 失败\] 输出开头/);
+  assert.match(tool, /已截断：原文 \d+ 字符，sha256 [a-f0-9]{16}/);
+  assert.ok(tool.length < 2200);
+  assert.doesNotMatch(tool, /输出结尾/);
+  assert.equal(record.meta.collection_gap, undefined);
+});

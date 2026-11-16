@@ -18,7 +18,7 @@ const boots = new Map();
 const sessions = new Map();
 
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.1/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.2/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}
@@ -156,7 +156,12 @@ async function onProviderRequest(event, ctx) {
   const keys = turnKeys(`${cwd}\0${sessionIdOf(ctx)}`, found.turns);
   const state = sessionState(ctx);
   if (!boots.has(keys[0])) remember(boots, keys[0], await fetchBoot(cwd, ctx));
-  await captureMessages(payload[found.list], ctx);
+  const lastTurnKey = keys[keys.length - 1];
+  if (!state.capturedTurns?.has(lastTurnKey)) {
+    state.capturedTurns = state.capturedTurns || new Set();
+    state.capturedTurns.add(lastTurnKey);
+    await captureMessages([{ role: 'user', text: found.turns.at(-1).text, provisional: true }], ctx);
+  }
 
   const lastIdx = keys.length - 1;
   if (!injections.has(keys[lastIdx])) {

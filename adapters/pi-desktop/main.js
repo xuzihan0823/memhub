@@ -7,7 +7,7 @@ const DEFAULT_BASE = 'http://127.0.0.1:4789';
 const AGENT = 'pi-desktop';
 
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.1/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.2/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}

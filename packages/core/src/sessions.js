@@ -53,6 +53,13 @@ function contentText(content) {
   }).filter(Boolean).join('\n');
 }
 
+const TOOL_TEXT_LIMIT = 2000;
+
+function compactToolText(text) {
+  if (text.length <= TOOL_TEXT_LIMIT) return text;
+  return `${text.slice(0, TOOL_TEXT_LIMIT)}\n…（已截断：原文 ${text.length} 字符，sha256 ${hash(text).slice(0, 16)}）`;
+}
+
 function normalizeSessionMessages(messages = []) {
   const occurrences = new Map();
   const out = [];
@@ -62,25 +69,32 @@ function normalizeSessionMessages(messages = []) {
       if (!['tool_result', 'tool_use', 'toolCall'].includes(p?.type)) return [];
       const call = p.type !== 'tool_result';
       const text = call ? `[调用 ${p.name || 'unknown'}] ${JSON.stringify(p.input ?? p.arguments ?? {})}` : contentText(p.content) || (typeof p.content === 'string' ? p.content : '');
-      return [{ role: 'tool', type: call ? 'tool_call' : 'tool_result', text, message_key: `${m.message_key || m.id || m.uuid || m.timestamp || hash(text)}:tool:${index}`, timestamp: m.timestamp }];
+      return [{ role: 'tool', type: call ? 'tool_call' : 'tool_result', isError: p.is_error, text, message_key: `${m.message_key || m.id || m.uuid || m.timestamp || hash(text)}:tool:${index}`, timestamp: m.timestamp }];
     });
     return [m, ...tools];
   });
   for (const m of expanded) {
     const role = m?.role === 'model' ? 'assistant' : m?.role;
     if (!['user', 'assistant', 'tool', 'toolResult'].includes(role)) continue;
-    const text = clean(m.text ?? contentText(m.content ?? m.parts));
+    const isTool = role === 'tool' || role === 'toolResult';
+    let text = clean(m.text ?? contentText(m.content ?? m.parts));
     if (!text) continue;
+    if (isTool) {
+      const label = m.type === 'tool_call' ? '' : `[工具结果${m.toolName ? ` ${m.toolName}` : ''}${m.isError || m.is_error ? ' · 失败' : ''}] `;
+      text = compactToolText(label + text);
+    }
     const fingerprint = hash(`${role}\0${text}`);
     const occurrence = (occurrences.get(fingerprint) || 0) + 1;
     occurrences.set(fingerprint, occurrence);
     const timestamp = m.created_at ?? m.timestamp;
+    const provisional = Boolean(m.provisional);
     out.push({
       message_key: String(m.message_key ?? m.id ?? m.uuid ?? (timestamp ? hash(`${role}\0${timestamp}\0${text}`) : `${fingerprint}:${occurrence}`)),
-      content_key: `${fingerprint}:${occurrence}`, stable_key: Boolean(m.message_key || m.id || m.uuid || timestamp),
-      turn_id: String(m.turn_id ?? ''), role: role === 'toolResult' ? 'tool' : role,
+      content_key: fingerprint, provisional,
+      stable_key: !provisional && Boolean(m.message_key || m.id || m.uuid || timestamp),
+      turn_id: String(m.turn_id ?? ''), role: isTool ? 'tool' : role,
       created_at: timestamp && Number.isFinite(new Date(timestamp).getTime()) ? new Date(timestamp).toISOString() : null,
-      text, type: m.type === 'tool_call' ? 'tool_call' : role === 'tool' || role === 'toolResult' ? 'tool_result' : 'message',
+      text, type: m.type === 'tool_call' ? 'tool_call' : isTool ? 'tool_result' : 'message',
     });
   }
   return out;
@@ -149,15 +163,13 @@ async function captureSession(stores, input = {}) {
     let added = 0;
     for (const m of normalizeSessionMessages(input.messages)) {
       if (seen.has(m.message_key)) continue;
-      const provisional = record.messages.find(old => old.content_key === m.content_key && (!old.stable_key || !m.stable_key));
-      if (provisional) {
-        if (m.stable_key) {
-          provisional.message_key = m.message_key;
-          provisional.stable_key = true;
-          provisional.created_at = m.created_at || provisional.created_at;
+      if (m.stable_key) {
+        const pending = record.messages.find(old => !old.stable_key && old.role === m.role && old.content_key?.split(':')[0] === m.content_key);
+        if (pending) {
+          Object.assign(pending, { message_key: m.message_key, stable_key: true, provisional: false, created_at: m.created_at || pending.created_at });
           seen.add(m.message_key);
+          continue;
         }
-        continue;
       }
       seen.add(m.message_key);
       const seq = record.messages.length + 1;
@@ -171,7 +183,7 @@ async function captureSession(stores, input = {}) {
       record.meta.summary_status = 'pending';
     }
     if (input.collection_gap) record.meta.collection_gap = clean(input.collection_gap);
-    if (record.messages.some(m => !m.stable_key)) record.meta.collection_gap = 'Some host messages lack stable IDs/timestamps; identical delta-only messages may be indistinguishable.';
+    if (record.messages.some(m => !m.stable_key && !m.provisional)) record.meta.collection_gap = 'Some host messages lack stable IDs/timestamps; identical delta-only messages may be indistinguishable.';
     record.meta.index_status = 'pending';
     await saveRecord(root, record);
     return { record, added };

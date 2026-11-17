@@ -4,37 +4,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
 const core = require('../../core/src');
 
 const MAX_SEEN = 200;
 const MAX_TOOL_INJECTIONS_PER_TURN = 3;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const NO_OUTPUT = '{}';
-const MEMHUB_BIN = path.resolve(__dirname, '../bin/memhub.js');
-
-function spawnReview({ transcriptPath, cwd, sessionId }) {
-  const child = spawn(process.execPath, [MEMHUB_BIN, 'review', '--transcript', transcriptPath, '--cwd', cwd, '--session', sessionId], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
-  child.unref();
-}
-
-function maybeReview(state, payload, { cwd, sessionId, force, spawnImpl }) {
-  const config = core.reviewConfig();
-  const transcriptPath = payload.transcript_path;
-  const pending = state.turn - (state.reviewedTurn || 0);
-  if (!config || typeof transcriptPath !== 'string' || !transcriptPath || pending < 1) return;
-  if (!force && pending < config.interval) return;
-  state.reviewedTurn = state.turn;
-  try {
-    (spawnImpl || spawnReview)({ transcriptPath, cwd, sessionId });
-  } catch {
-    // non-fatal
-  }
-}
 
 function cacheFileFor({ cacheDir, cwd, sessionId }) {
   if (!sessionId) return null;
@@ -115,7 +90,7 @@ function contextOutput(eventName, text) {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: eventName, additionalContext: text } });
 }
 
-async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, cacheDir, fetchImpl, spawnImpl } = {}) {
+async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, cacheDir, fetchImpl } = {}) {
   const cwd = payload.cwd || flags.cwd || process.cwd();
   const stores = core.resolveStores({ cwd, homeDir, globalDir });
   const sessionId = String(payload.session_id || payload.sessionId || '');
@@ -124,7 +99,7 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
 
   if (event === 'SessionStart') {
     const source = String(payload.source || 'startup');
-    const fresh = { ids: [], dirs: [], turn: 0, toolInjections: 0, wrote: false, handoffTouched: false, reviewedTurn: 0 };
+    const fresh = { ids: [], dirs: [], turn: 0, toolInjections: 0, wrote: false, handoffTouched: false };
     await core.scaffoldGlobalStore(stores.globalDir);
     const boot = await core.bootContext(stores);
     writeState(file, source === 'resume' ? { ...state, toolInjections: 0 } : fresh);
@@ -191,22 +166,13 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     const notes = [];
     const pending = await core.listInboxBatches(stores);
     if (pending.length) notes.push(`MemHub 提示：当前有 ${pending.length} 条待审批记忆提案，可运行 memhub ui 处理。`);
-    const shouldNudge = state.wrote && !state.handoffTouched && !payload.stop_hook_active && process.env.MEMHUB_STOP_NUDGE !== '0';
-    if (!payload.stop_hook_active) maybeReview(state, payload, { cwd, sessionId, force: false, spawnImpl });
+    const handoffHint = state.wrote && !state.handoffTouched;
     writeState(file, { ...state, wrote: false });
-    if (shouldNudge) {
-      return JSON.stringify({
-        decision: 'block',
-        reason: '本轮修改了文件或执行了命令，但还没有更新任务交接单。若任务未全部完成，请调用 memory_propose 提交 scope="handoff" 的交接单（固定 task 键，写明验收标准勾选情况与下一步）；若已全部完成且有证据，提交 status="done" 并先沉淀可复用经验；若本轮只是一次性小改动无需交接，直接结束即可。',
-      });
+    if (!payload.stop_hook_active && core.selfCheckEnabled(stores)) {
+      const hint = handoffHint ? '\n本轮修改了文件但还没有更新任务交接单；任务未完成时请先提交 scope="handoff" 交接单。' : '';
+      return JSON.stringify({ decision: 'block', reason: `${core.selfCheckPrompt()}${hint}`, ...(notes.length ? { systemMessage: notes.join('\n') } : {}) });
     }
     return notes.length ? JSON.stringify({ systemMessage: notes.join('\n') }) : NO_OUTPUT;
-  }
-
-  if (event === 'SessionEnd') {
-    maybeReview(state, payload, { cwd, sessionId, force: true, spawnImpl });
-    writeState(file, state);
-    return NO_OUTPUT;
   }
 
   return NO_OUTPUT;

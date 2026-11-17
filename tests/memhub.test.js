@@ -594,7 +594,7 @@ test('hook: session boot, compact reset, tool-failure retrieval, and Stop handof
     await run('UserPromptSubmit', { prompt: '再改一下' });
     await run('PostToolUse', { tool_name: 'Edit', tool_input: { file_path: path.join(repoDir, 'src', 'b.js') } });
     await run('PostToolUse', { tool_name: 'mcp__memhub__memory_propose', tool_input: { items: [{ scope: 'handoff', title: 't', content: 'c' }] } });
-    assert.deepEqual(JSON.parse(await run('Stop', { stop_hook_active: false })), {});
+    assert.doesNotMatch(JSON.parse(await run('Stop', { stop_hook_active: false })).reason, /还没有更新任务交接单/);
   } finally {
     if (prevRerank !== undefined) process.env.MEMHUB_RERANK_URL = prevRerank;
     await fsp.rm(base, { recursive: true, force: true });
@@ -606,7 +606,10 @@ test('cli setup: uninstall removes only memhub entries and keeps later user edit
   try {
     const settingsPath = path.join(homeDir, '.claude', 'settings.json');
     await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
-    await fsp.writeFile(settingsPath, JSON.stringify({ model: 'sonnet', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
+    await fsp.writeFile(settingsPath, JSON.stringify({ model: 'sonnet', hooks: {
+      Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }],
+      SessionEnd: [{ hooks: [{ type: 'command', command: 'node "/old/memhub/packages/cli/bin/memhub.js" hook claude-code --event SessionEnd' }] }],
+    } }));
     await fsp.writeFile(path.join(homeDir, '.claude.json'), JSON.stringify({ projects: { a: 1 }, mcpServers: { other: { command: 'x' } } }));
 
     await installForAgent('claude', { homeDir });
@@ -614,6 +617,7 @@ test('cli setup: uninstall removes only memhub entries and keeps later user edit
     const installed = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     assert.equal(installed.hooks.Stop.length, 2);
     assert.equal(installed.hooks.PostToolUseFailure.length, 1);
+    assert.equal(installed.hooks.SessionEnd, undefined);
 
     installed.theme = 'dark';
     fs.writeFileSync(settingsPath, JSON.stringify(installed));
@@ -777,15 +781,6 @@ test('core: archiving a global handoff keeps the global index title', async () =
   }
 });
 
-function fakeReviewModel(items, calls = []) {
-  return async (url, init) => {
-    calls.push({ url, body: JSON.parse(init.body) });
-    return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ items }) } }] }) };
-  };
-}
-
-const REVIEW_ENV = { MEMHUB_REVIEW_URL: 'https://example.com/v1', MEMHUB_REVIEW_MODEL: 'small', MEMHUB_REVIEW_INTERVAL: '2' };
-
 function withEnv(vars, fn) {
   const prev = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]));
   Object.assign(process.env, vars);
@@ -798,131 +793,79 @@ function withEnv(vars, fn) {
   return Promise.resolve().then(fn).finally(restore);
 }
 
-test('review: protocol carries write rules and review queues redacted proposals for approval', async () => {
-  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
-  try {
-    assert.match(core.renderProtocol(), /不要从话题、语气或用到的工具推断用户特质/);
-    const stores = core.resolveStores({ homeDir, globalDir, cwd: repoDir });
-    await core.proposeMemory(stores, { items: [{ scope: 'global', type: 'skill', title: '已有结论', content: 'x' }] });
-    const messages = [
-      { role: 'user', content: `以后提交信息都用中文，记住。顺便 key 是 sk-abcdefghijklmnopqrstuvwxyz123456 ${'背景'.repeat(80)}\n<memory-context note="x">\n- 注入内容\n</memory-context>` },
-      { role: 'assistant', content: [{ type: 'text', text: '好的' }, { type: 'tool_use', name: 'Bash', input: { command: 'git log' } }] },
-    ];
-    const calls = [];
-    const config = core.reviewConfig(REVIEW_ENV);
-    const res = await core.reviewConversation(stores, {
-      messages,
-      config,
-      fetchImpl: fakeReviewModel([
-        { title: '提交信息使用中文', summary: '所有仓库', content: '用户要求提交信息用中文', scope: 'global', type: 'user' },
-        { title: '泄露', content: 'sk-abcdefghijklmnopqrstuvwxyz123456', scope: 'global' },
-      ], calls),
-    });
-    assert.equal(res.status, 'pending_review');
-    assert.equal(res.batchIds.length, 1);
-
-    const prompt = calls[0].body.messages.map(m => m.content).join('\n');
-    assert.match(prompt, /已有结论/);
-    assert.match(prompt, /<REDACTED>/);
-    assert.doesNotMatch(prompt, /sk-abcdef|注入内容/);
-
-    const inbox = await core.listInboxBatches(stores);
-    assert.equal(inbox.length, 1);
-    assert.equal(inbox[0].items[0].item.title, '提交信息使用中文');
-    assert.equal((await core.loadAllEntries(stores)).some(e => e.title === '提交信息使用中文'), false);
-
-    assert.equal((await core.reviewConversation(stores, { messages, config, fetchImpl: fakeReviewModel([]) })).status, 'nothing');
-    assert.equal((await core.reviewConversation(stores, { messages: [{ role: 'user', content: 'hi' }], config, fetchImpl: fakeReviewModel([]) })).status, 'skipped');
-    assert.equal((await core.reviewConversation(stores, { messages, config: null })).status, 'disabled');
-  } finally {
-    await fsp.rm(base, { recursive: true, force: true });
-  }
-});
-
-test('review: claude hooks spawn review every N turns and on SessionEnd', async () => {
+test('self-check: claude Stop asks the same agent to self-check once per run and can be disabled', async () => {
   const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
   const cacheDir = path.join(base, 'cache');
-  const spawned = [];
   const run = (event, payload = {}) => runHook({
     event,
-    payload: { cwd: repoDir, session_id: 's-review', transcript_path: '/tmp/t.jsonl', stop_hook_active: false, ...payload },
-    homeDir, globalDir, cacheDir, fetchImpl: null, spawnImpl: args => spawned.push(args),
+    payload: { cwd: repoDir, session_id: 's-self', stop_hook_active: false, ...payload },
+    homeDir, globalDir, cacheDir, fetchImpl: null,
   });
   try {
-    await withEnv({ ...REVIEW_ENV, MEMHUB_STOP_NUDGE: '0' }, async () => {
-      await run('SessionStart', { source: 'startup' });
-      await run('UserPromptSubmit', { prompt: '第一个问题' });
-      await run('Stop');
-      assert.equal(spawned.length, 0);
-      await run('UserPromptSubmit', { prompt: '第二个问题' });
-      await run('Stop');
-      assert.equal(spawned.length, 1);
-      assert.equal(spawned[0].transcriptPath, '/tmp/t.jsonl');
-      await run('SessionEnd');
-      assert.equal(spawned.length, 1);
-      await run('UserPromptSubmit', { prompt: '第三个问题' });
-      await run('SessionEnd');
-      assert.equal(spawned.length, 2);
+    await run('SessionStart', { source: 'startup' });
+    await run('UserPromptSubmit', { prompt: '以后提交信息都用中文' });
+    const stop = JSON.parse(await run('Stop'));
+    assert.equal(stop.decision, 'block');
+    assert.ok(stop.reason.startsWith(core.SELF_CHECK_MARKER));
+    assert.match(stop.reason, /memory_propose/);
+    assert.match(stop.reason, /无需记录/);
+    assert.doesNotMatch(stop.reason, /交接单。$/);
+    assert.deepEqual(JSON.parse(await run('Stop', { stop_hook_active: true })), {});
+
+    await withEnv({ MEMHUB_SELF_CHECK: '0' }, async () => {
+      assert.deepEqual(JSON.parse(await run('Stop')), {});
     });
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(path.join(globalDir, 'config.json'), JSON.stringify({ selfCheck: { enabled: false } }));
+    assert.deepEqual(JSON.parse(await run('Stop')), {});
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
 
-test('review: claude transcript parser keeps dialogue and drops meta, sidechain and noise', async () => {
-  const { base } = await makeTempWorkspace();
-  try {
-    const file = path.join(base, 't.jsonl');
-    const rows = [
-      { type: 'queue-operation', content: 'x' },
-      { type: 'user', message: { role: 'user', content: '真实问题' } },
-      { type: 'user', isMeta: true, message: { role: 'user', content: '元信息' } },
-      { type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [{ type: 'text', text: '子代理' }] } },
-      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: '思考' }, { type: 'text', text: '回答' }] } },
-      { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', is_error: true, content: 'boom' }] } },
-    ];
-    await fsp.writeFile(file, rows.map(r => JSON.stringify(r)).join('\n'));
-    const text = core.renderTurns(core.readClaudeTranscript(file));
-    assert.match(text, /真实问题/);
-    assert.match(text, /回答/);
-    assert.match(text, /工具结果·失败\] boom/);
-    assert.doesNotMatch(text, /元信息|子代理|思考/);
-  } finally {
-    await fsp.rm(base, { recursive: true, force: true });
-  }
-});
-
-test('review: pi-desktop reviews buffered runs every N user turns and on shutdown', async () => {
+test('self-check: pi-desktop queues one self-check after a settled run and keeps it out of journals', async () => {
   const { base, globalDir, repoDir } = await makeTempWorkspace();
-  const calls = [];
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = fakeReviewModel([{ title: '部署前先跑 smoke 测试', content: '用户要求', scope: 'project', type: 'decision' }], calls);
   try {
-    await withEnv({ ...REVIEW_ENV, MEMHUB_GLOBAL_DIR: globalDir }, async () => {
+    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir }, async () => {
       const extPath = path.resolve(__dirname, '../adapters/pi-desktop/extension.js');
       delete require.cache[require.resolve(extPath)];
-      const { onAgentEnd } = require(extPath)._internals;
-      const ctx = { cwd: repoDir, sessionManager: { getSessionId: () => 'pi-review' } };
-      const turn = n => ({ messages: [
-        { role: 'user', content: `以后部署前都先跑 smoke 测试 ${n} ${'上下文'.repeat(80)}` },
-        { role: 'assistant', content: [{ type: 'text', text: '收到' }] },
-      ] });
+      const { onProviderRequest, onAgentEnd, onAgentSettled, TOOLS } = require(extPath)._internals;
+      const sent = [];
+      const pi = { sendUserMessage: async text => { sent.push(text); } };
+      const ctx = { cwd: repoDir, sessionId: 'pi-self' };
+      const turn = [
+        { role: 'user', content: '以后部署前都先跑 smoke 测试', timestamp: 1700000000000 },
+        { role: 'assistant', content: [{ type: 'text', text: '收到' }], timestamp: 1700000001000 },
+      ];
 
-      assert.equal(await onAgentEnd(turn(1), ctx), undefined);
-      assert.equal(calls.length, 0);
-      await onAgentEnd(turn(2), ctx);
-      await new Promise(r => setTimeout(r, 50));
-      assert.equal(calls.length, 1);
-      assert.match(calls[0].body.messages[1].content, /smoke 测试 1[\s\S]*smoke 测试 2/);
+      await onAgentEnd({ messages: turn }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 1);
+      assert.ok(sent[0].startsWith(core.SELF_CHECK_MARKER));
+      assert.match(sent[0], new RegExp(TOOLS.propose));
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 1);
 
-      await onAgentEnd(turn(3), ctx);
-      await onAgentEnd({}, ctx, { force: true });
-      assert.equal(calls.length, 2);
+      const checkTurn = [
+        { role: 'user', content: sent[0], timestamp: 1700000002000 },
+        { role: 'assistant', content: [{ type: 'text', text: '无需记录' }], timestamp: 1700000003000 },
+      ];
+      const checkPayload = await onProviderRequest({ payload: { messages: [...turn, checkTurn[0]] } }, ctx);
+      assert.equal(checkPayload.messages.at(-1).content, sent[0]);
+      await onAgentEnd({ messages: checkTurn }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 1);
+
+      await onAgentEnd({ messages: [{ role: 'user', content: '下一个问题', timestamp: 1700000004000 }] }, ctx);
+      await onAgentSettled({ aborted: true }, ctx, pi);
+      assert.equal(sent.length, 1);
+
       const stores = core.resolveStores({ globalDir, cwd: repoDir });
-      assert.ok((await core.listInboxBatches(stores)).length >= 1);
+      const [session] = await core.listSessions(stores);
+      const texts = (await core.loadSession(stores, { session_key: session.session_key })).messages.map(m => m.text);
+      assert.deepEqual(texts, ['以后部署前都先跑 smoke 测试', '收到', '下一个问题']);
     });
   } finally {
-    globalThis.fetch = prevFetch;
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
@@ -931,27 +874,25 @@ test('model config: file works without shell exports and environment overrides i
   const { base, globalDir } = await makeTempWorkspace();
   const env = { MEMHUB_GLOBAL_DIR: globalDir };
   const file = path.join(globalDir, 'config.json');
+  const RERANK_ENV = { MEMHUB_RERANK_URL: 'https://example.com/v1', MEMHUB_RERANK_MODEL: 'small' };
   try {
-    assert.equal(core.reviewConfig(env), null);
+    assert.equal(core.rerankConfig(env), null);
     await fsp.mkdir(globalDir, { recursive: true });
-    await fsp.writeFile(file, JSON.stringify({ review: {
-      url: 'http://127.0.0.1:3425/v1/', model: 'example/light-model',
-      interval: 3, reasoningEffort: 'low', timeoutMs: 60000,
+    await fsp.writeFile(file, JSON.stringify({ review: { url: 'http://x/v1', model: 'ignored' }, rerank: {
+      url: 'http://127.0.0.1:3425/v1/', model: 'example/light-model', reasoningEffort: 'low', timeoutMs: 60000,
     } }));
-    const config = core.reviewConfig(env);
+    const config = core.rerankConfig(env);
     assert.equal(config.url, 'http://127.0.0.1:3425/v1/chat/completions');
     assert.equal(config.model, 'example/light-model');
-    assert.equal(config.interval, 3);
     assert.equal(config.reasoningEffort, 'low');
     assert.equal(config.apiKey, '');
-    assert.equal(core.rerankConfig(env), null);
+    assert.equal(core.reviewConfig, undefined);
 
-    const override = core.reviewConfig({ ...env, ...REVIEW_ENV, MEMHUB_REVIEW_REASONING_EFFORT: 'none' });
+    const override = core.rerankConfig({ ...env, ...RERANK_ENV, MEMHUB_RERANK_REASONING_EFFORT: 'none' });
     assert.equal(override.url, 'https://example.com/v1/chat/completions');
     assert.equal(override.model, 'small');
-    assert.equal(override.interval, 2);
     assert.equal(override.reasoningEffort, 'none');
-    assert.equal(core.reviewConfig({ ...env, MEMHUB_REVIEW_ENABLED: '0' }), null);
+    assert.equal(core.rerankConfig({ ...env, MEMHUB_RERANK_ENABLED: '0' }), null);
 
     let request;
     const text = await core.chatCompletion(config, [{ role: 'user', content: '测试' }], {
@@ -966,12 +907,12 @@ test('model config: file works without shell exports and environment overrides i
     assert.equal(request.headers['User-Agent'], 'memhub/1');
     assert.equal(request.headers.Authorization, undefined);
 
-    await fsp.writeFile(file, JSON.stringify({ review: { enabled: false, url: config.url, model: config.model } }));
-    assert.equal(core.reviewConfig(env), null);
-    assert.ok(core.reviewConfig({ ...env, MEMHUB_REVIEW_ENABLED: '1' }));
+    await fsp.writeFile(file, JSON.stringify({ rerank: { enabled: false, url: config.url, model: config.model } }));
+    assert.equal(core.rerankConfig(env), null);
+    assert.ok(core.rerankConfig({ ...env, MEMHUB_RERANK_ENABLED: '1' }));
     await fsp.writeFile(file, '{broken');
-    assert.equal(core.reviewConfig(env), null);
-    assert.equal(core.reviewConfig({ ...env, ...REVIEW_ENV }).model, 'small');
+    assert.equal(core.rerankConfig(env), null);
+    assert.equal(core.rerankConfig({ ...env, ...RERANK_ENV }).model, 'small');
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
@@ -1031,8 +972,7 @@ test('protocol: project progress uses targeted handoffs rather than global long-
   assert.match(protocol, /task="project-status"/);
   assert.match(protocol, /cwd 参数决定目标项目/);
   assert.match(protocol, /未提供.*不要编造/);
-  const review = core.buildReviewMessages('PocketWorld 进入动作细调阶段', [])[0].content;
-  assert.match(review, /应由前台助手写入目标项目的短期交接/);
+  assert.match(core.selfCheckPrompt(), /写入对应项目的短期交接/);
   for (const tool of require('../adapters/pi-desktop/manifest.json').contributes.agentTools) {
     assert.equal(tool.schema.properties.cwd.type, 'string');
   }

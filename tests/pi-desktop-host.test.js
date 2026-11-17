@@ -33,10 +33,12 @@ test('PI host loader: versioned entry replaces cached factory and saves/restores
   await fs.writeFile(path.join(plugin, 'core/src/index.js'), 'module.exports = { legacy: true };\n');
   await fs.writeFile(legacyEntry, "const core = require('./core/src'); module.exports = pi => pi.on('before_provider_request', event => ({...event.payload, cachedLegacyFactory:core.legacy}));\n");
   const { TrustedExtensionRunner } = await import(pathToFileURL(runnerPath).href);
+  const queued = [];
   const makeRunner = async (entry, sessionId) => {
     const runner = new TrustedExtensionRunner({ specs: [{ id: entry, entry, label: 'MemHub' }], bridge: {
       cwd, sessionId, publishCommands() {}, publishDiagnostics() {}, getModel() {},
       isIdle: () => true, hasPendingMessages: () => false,
+      sendUserMessage: async (text, options) => { queued.push({ sessionId, text, options }); },
     } });
     runners.push(runner);
     const reports = await runner.load();
@@ -62,6 +64,10 @@ test('PI host loader: versioned entry replaces cached factory and saves/restores
   assert.match(restored.messages[0].content, /memory-session/);
   assert.match(restored.messages[0].content, /loader probe/);
   assert.match(restored.messages[0].content, /host reply/);
+  await a.emit('agent_settled', { aborted: false });
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].sessionId, 'a');
+  assert.ok(queued[0].text.startsWith(core.SELF_CHECK_MARKER));
   assert.deepEqual(a.getDiagnostics(), []);
   assert.deepEqual(b.getDiagnostics(), []);
 });

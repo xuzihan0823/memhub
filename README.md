@@ -42,50 +42,25 @@ export MEMHUB_RERANK_TIMEOUT_MS=1500                            # 可选
 
 注意：开启后，候选记忆的标题与摘要、当前提问会发送到该接口。
 
-## 后台复盘
+## 每轮结束自检
 
-Agent 经常忘了主动写记忆，后台复盘用来补这个缺口：每隔 N 轮对话，以及会话结束时，把这段对话交给一个模型，让它按写入规则挑出值得长期保存的内容。挑出的候选**不会直接写入**，而是进入 Inbox，确认后才生效（Web 控制台、`memhub inbox` / `memhub commit <batchId>`）。
+Agent 经常忘了主动写记忆。MemHub 不额外调用复盘模型，而是在每轮任务结束后，让**同一个 Agent** 再做一次简短自检：回看自上次自检以来的对话，按写入规则把有依据、以后还会用到的结论直接写入长期记忆，把任务进度写入交接单；没有可记的内容时只回复“无需记录”。自检这一轮不会再触发新的自检。
 
-从 Dock / Finder 启动 PI-Desktop 时，推荐在全局记忆库的 `config.json`（默认 `~/.memory/config.json`）配置，无需设置系统环境变量。文件不应包含真实密钥并提交到 Git；本机 Magpie 通常无需 API Key：
+- **Claude Code**：`Stop` Hook 返回 `decision: "block"` 和自检说明，Agent 在同一轮里完成自检后再结束；`stop_hook_active` 防止循环。本轮改过文件但未更新交接单时，自检说明会附带提醒。
+- **PI-Desktop**：插件在 `agent_settled`（本轮完全结束、会话空闲）时用 `sendUserMessage` 追加一条自检消息，作为下一轮执行；被中断的轮次不追加。自检消息及其回复不写入会话记录，也不参与记忆检索。
+- **Codex / Cursor / Pi CLI**：当前没有接入 Hook，仍依赖 Agent 主动调用 `memory_propose`。
 
-```json
-{
-  "review": {
-    "enabled": true,
-    "url": "http://127.0.0.1:3425/v1",
-    "model": "<provider>/<light-model>",
-    "reasoningEffort": "low",
-    "interval": 3,
-    "timeoutMs": 60000
-  }
-}
-```
+自检会额外消耗一次模型调用。默认开启；在全局 `config.json` 中设置 `"selfCheck": { "enabled": false }`，或设置 `MEMHUB_SELF_CHECK=0` 即可关闭。
 
-`model` 填 Magpie `/v1/models` 中的完整 ID，选你希望用于复盘的轻量模型。短请求或“复盘”提示词不保证网关自动降级；`group/coding` 也可能被配置为主模型，不能视作低价模型别名。`reasoningEffort` 是可选的思考强度，需模型支持。此配置只开启复盘；精排可另加 `rerank` 配置段。
+## 会话保存与续聊（PI 插件 0.3.3）
 
-仍支持环境变量，逐字段覆盖文件配置。把文件中 `review.enabled` 改为 `false`，或设置 `MEMHUB_REVIEW_ENABLED=0` 即可关闭；未提供完整的 URL 与模型时保持关闭：
+PI-Desktop 在请求前保存可取得的消息，在 `agent_end` 等待本轮基础落盘，`session_shutdown` 补存；保存不依赖任何模型。新会话启动时恢复同一工作区最近的其他主会话，注入独立的 `<memory-session>` 块，标明来源 Agent、时间、序号和摘要覆盖范围，并将来源固定到本次会话。后台摘要未完成或失败时仍能读取已保存原话。此自动流程已通过扩展事件测试，真实桌面端双窗口验收仍待执行。
 
-```bash
-export MEMHUB_REVIEW_URL=https://<OPENAI_COMPATIBLE_HOST>/v1
-export MEMHUB_REVIEW_MODEL=<model>
-export MEMHUB_REVIEW_API_KEY=<key>                              # 可选
-export MEMHUB_REVIEW_INTERVAL=10                                # 每 N 轮用户消息复盘一次，默认 10
-export MEMHUB_REVIEW_TIMEOUT_MS=60000                           # 可选
-export MEMHUB_REVIEW_REASONING_EFFORT=low                        # 可选
-export MEMHUB_REVIEW_ENABLED=0                                  # 可选：关闭复盘
-```
+插件实现入口与 bundled core 使用版本化路径（当前 `extension-0.3.3.js`、`core/0.3.3/src/`）：PI 0.22.0 会按入口路径缓存旧模块，同路径重装后仍会运行旧代码。测试包含直接使用 PI 0.22.0 加载器的缓存复现、保存/恢复，以及 `agent_settled` 后追加自检消息；完整桌面 UI 验收仍待安装新版后执行。
 
-Claude Code 在 `Stop` 达到间隔、或 `SessionEnd` 时启动一个独立后台进程（`memhub review`），不阻塞对话；PI-Desktop 插件在 `agent_end` 和 `session_shutdown` 时触发。发送前会去掉注入的 `<memory-*>` 块并把疑似密钥替换为 `<REDACTED>`，对话正文最多约 2.4 万字符。注意：开启后，对话内容会发送到该接口。
+会话日志不进入长期目录、搜索或 Inbox；在 A 中讨论 B 的对话仍保存到 A。B 的当前阶段继续由 Agent 通过 `cwd` 指向 B 的交接工具维护。既有聊天不会自动批量导入。
 
-## 会话保存与续聊（PI 插件 0.3.1）
-
-PI-Desktop 在请求前保存可取得的消息，在 `agent_end` 等待本轮基础落盘，`session_shutdown` 补存；不依赖长期复盘模型。新会话启动时恢复同一工作区最近的其他主会话，注入独立的 `<memory-session>` 块，标明来源 Agent、时间、序号和摘要覆盖范围，并将来源固定到本次会话。后台摘要未完成或失败时仍能读取已保存原话。此自动流程已通过扩展事件测试，真实桌面端双窗口验收仍待执行。
-
-0.3.1 修复已安装但未采集的升级场景：PI 0.22.0 会缓存旧入口模块，实现入口和 bundled core 改用版本化路径，防止同路径重装后仍运行旧代码。另修复会话工具上下文无 cwd 时的工作区回退。43 项测试通过，包含直接使用 PI 0.22.0 加载器的缓存复现与保存/恢复测试；完整桌面 UI 验收仍待安装新版后执行。
-
-会话日志不进入长期目录、搜索或 Inbox；在 A 中讨论 B 的对话仍保存到 A。B 的当前阶段继续由前台助手通过 `cwd` 指向 B 的交接工具维护。既有聊天不会自动批量导入。
-
-基础保存默认开启。可在全局 `config.json` 中设置 `"sessions": { "enabled": false }`，或 `MEMHUB_SESSIONS_ENABLED=0` 关闭自动采集与恢复。摘要使用单独的 `summary` 配置段（字段同 `review`：`enabled`、`url`、`model`、可选 `apiKey`、`timeoutMs`、`reasoningEffort`），也支持 `MEMHUB_SUMMARY_*` 环境变量；未配置完整 URL 和模型时不发送摘要请求，且不会隐式复用复盘通道。开启后，会将已过滤的会话文字发送到明确配置的端点，结果自动保存到会话记录。`summary.enabled=false` / `MEMHUB_SUMMARY_ENABLED=0` 只关闭模型摘要。
+基础保存默认开启。可在全局 `config.json` 中设置 `"sessions": { "enabled": false }`，或 `MEMHUB_SESSIONS_ENABLED=0` 关闭自动采集与恢复。摘要使用单独的 `summary` 配置段（字段：`enabled`、`url`、`model`、可选 `apiKey`、`timeoutMs`、`reasoningEffort`），也支持 `MEMHUB_SUMMARY_*` 环境变量；未配置完整 URL 和模型时不发送摘要请求。开启后，会将已过滤的会话文字发送到明确配置的端点，结果自动保存到会话记录。`summary.enabled=false` / `MEMHUB_SUMMARY_ENABLED=0` 只关闭模型摘要。
 
 ```bash
 node packages/cli/bin/memhub.js session list --cwd /path/to/repo
@@ -102,7 +77,7 @@ PI 工具为 `session_capture` / `session_restore` / `session_list` / `session_l
 ## 接入方式
 
 - **PI-Desktop 插件**（`adapters/pi-desktop/`）：进程内读写记忆库，不需要守护进程；提供启动目录、每轮与工具错误检索、会话保存与恢复，以及 4 个长期记忆工具和 5 个会话工具。
-- **Claude Code**：`SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PostToolUseFailure` / `Stop` / `SessionEnd` 六个 Hook + MCP。`Stop` Hook 在本轮改过文件却没更新交接单时，会要求 Agent 先更新交接单（可用 `MEMHUB_STOP_NUDGE=0` 关闭）；`Stop` 与 `SessionEnd` 还负责按间隔触发后台复盘。已安装过的用户需重新运行 `memhub init --agents claude` 才会注册 `SessionEnd`。
+- **Claude Code**：`SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PostToolUseFailure` / `Stop` 五个 Hook + MCP。`Stop` Hook 负责每轮结束自检（见上文）。旧版本注册过的 `SessionEnd` Hook 不再需要，重新运行 `memhub init --agents claude` 会自动清理。
 - **Codex / Cursor / Pi CLI**：MCP（`memhub mcp`）+ `adapters/cursor-codex/SKILL.md` 规则。没有 Hook，只能靠 Agent 主动调用。安装 Codex 时会遵循 `CODEX_HOME` 环境变量。
 - **纯文件兜底**：自描述的 `MEMORY.md` 与自动维护的 `index.md`。
 

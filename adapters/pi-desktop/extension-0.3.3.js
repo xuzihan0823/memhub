@@ -11,14 +11,13 @@ const TOOLS = { load: `${TOOL_PREFIX}load`, search: `${TOOL_PREFIX}search`, prop
 const EDIT_TOOLS = new Set(['edit', 'write', 'multiedit', 'read']);
 const MAX_CACHE = 500;
 const MAX_TOOL_INJECTIONS_PER_SESSION = 20;
-const MAX_REVIEW_BUFFER = 400;
 
 const injections = new Map();
 const boots = new Map();
 const sessions = new Map();
 
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.2/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.3/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}
@@ -41,7 +40,7 @@ const sessionIdOf = ctx => {
 
 function sessionState(ctx) {
   const key = `${sessionIdOf(ctx)}\0${ctx?.cwd || ''}`;
-  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, turns: 0, buffer: [], review: null });
+  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, selfCheckDue: false });
   return sessions.get(key);
 }
 
@@ -157,14 +156,15 @@ async function onProviderRequest(event, ctx) {
   const state = sessionState(ctx);
   if (!boots.has(keys[0])) remember(boots, keys[0], await fetchBoot(cwd, ctx));
   const lastTurnKey = keys[keys.length - 1];
-  if (!state.capturedTurns?.has(lastTurnKey)) {
+  const selfCheck = found.turns.at(-1).text.trimStart().startsWith(localCore?.SELF_CHECK_MARKER || '[memhub:self-check]');
+  if (!selfCheck && !state.capturedTurns?.has(lastTurnKey)) {
     state.capturedTurns = state.capturedTurns || new Set();
     state.capturedTurns.add(lastTurnKey);
     await captureMessages([{ role: 'user', text: found.turns.at(-1).text, provisional: true }], ctx);
   }
 
   const lastIdx = keys.length - 1;
-  if (!injections.has(keys[lastIdx])) {
+  if (!selfCheck && !injections.has(keys[lastIdx])) {
     const exclude = [...new Set([...state.ids, ...keys.slice(0, -1).flatMap(k => injections.get(k)?.ids ?? [])])];
     const turn = found.turns[lastIdx];
     const record = await fetchContext(cwd, {
@@ -246,34 +246,32 @@ async function captureMessages(messages, ctx) {
   }
 }
 
-async function onAgentEnd(event, ctx, options = {}) {
+function isSelfCheckRun(messages) {
+  const firstUser = (messages || []).find(m => m?.role === 'user');
+  const text = typeof firstUser?.content === 'string' ? firstUser.content
+    : Array.isArray(firstUser?.content) ? firstUser.content.filter(p => typeof p?.text === 'string').map(p => p.text).join('\n') : '';
+  return text.trimStart().startsWith(localCore?.SELF_CHECK_MARKER || '[memhub:self-check]');
+}
+
+async function onAgentEnd(event, ctx) {
   const result = await captureMessages(event?.messages || [], ctx);
   const state = sessionState(ctx);
   if (result?.status === 'saved' && localCore.summaryConfig(localCore.resolveStores({ cwd: ctx.cwd }))) {
     state.summary = Promise.resolve(state.summary).then(() => localCore.summarizeSession(localCore.resolveStores({ cwd: ctx.cwd }), { session_key: result.session_key })).catch(() => ({ status: 'failed' }));
   }
-  return onReviewEnd(event, ctx, options);
+  state.selfCheckDue = Boolean(localCore && ctx?.cwd && event?.messages?.length && !isSelfCheckRun(event.messages)
+    && localCore.selfCheckEnabled(localCore.resolveStores({ cwd: ctx.cwd })));
 }
 
-function onReviewEnd(event, ctx, { force = false } = {}) {
-  const cwd = ctx?.cwd;
-  const config = localCore?.reviewConfig();
-  if (!config || typeof cwd !== 'string' || !cwd) return undefined;
+async function onAgentSettled(event, ctx, pi) {
   const state = sessionState(ctx);
-  if (Array.isArray(event?.messages)) {
-    state.buffer.push(...event.messages);
-    if (state.buffer.length > MAX_REVIEW_BUFFER) state.buffer.splice(0, state.buffer.length - MAX_REVIEW_BUFFER);
-    if (event.messages.some(m => m?.role === 'user')) state.turns += 1;
+  if (!state.selfCheckDue || event?.aborted || typeof pi?.sendUserMessage !== 'function') return;
+  state.selfCheckDue = false;
+  try {
+    await pi.sendUserMessage(localCore.selfCheckPrompt(TOOLS.propose));
+  } catch {
+    // host refused or session closed; next turn still runs normally
   }
-  if (!state.buffer.length || (!force && (state.review || state.turns < config.interval))) return force ? state.review || undefined : undefined;
-  const messages = state.buffer.splice(0);
-  state.turns = 0;
-  const run = Promise.resolve(state.review)
-    .then(() => localCore.reviewConversation(localCore.resolveStores({ cwd }), { messages, sessionId: sessionIdOf(ctx), agent: 'pi-desktop-review', config }))
-    .catch(() => null)
-    .finally(() => { if (state.review === run) state.review = null; });
-  state.review = run;
-  return force ? run : undefined;
 }
 
 module.exports = function memhubExtension(pi) {
@@ -281,6 +279,7 @@ module.exports = function memhubExtension(pi) {
   pi.on('before_provider_request', (event, ctx) => onProviderRequest(event, ctx));
   pi.on('tool_result', (event, ctx) => onToolResult(event, ctx));
   pi.on('agent_end', (event, ctx) => onAgentEnd(event, ctx));
-  pi.on('session_shutdown', (_event, ctx) => onAgentEnd({}, ctx, { force: true }));
+  pi.on('agent_settled', (event, ctx) => onAgentSettled(event, ctx, pi));
+  pi.on('session_shutdown', (_event, ctx) => onAgentEnd({}, ctx));
 };
-module.exports._internals = { onProviderRequest, onToolResult, onAgentEnd, injections, boots, sessions, TOOLS };
+module.exports._internals = { onProviderRequest, onToolResult, onAgentEnd, onAgentSettled, injections, boots, sessions, TOOLS };

@@ -179,6 +179,27 @@ const MEMORY_WRITE_RULES = [
   '踩坑写成“规则 + 一句原因”，不写 PR 号、日期和事故经过；同一结论只写一次，已有记忆不准时用同标题提交来替代，而不是另起一条。',
 ].join('');
 
+const SELF_CHECK_MARKER = '[memhub:self-check]';
+
+function selfCheckPrompt(propose = 'memory_propose') {
+  return [
+    `${SELF_CHECK_MARKER} MemHub 记忆自检：回看自上一次记忆自检以来的对话，判断是否有需要保存的内容。`,
+    `长期记忆用 ${propose} 写入：${MEMORY_WRITE_RULES}`,
+    '任务进度、待办和阻塞写 scope="handoff" 交接单（固定 task 键，按目标/进度/验收标准/下一步书写）；只是一次性小问答就不写。',
+    `已有记忆已覆盖的结论不要重复提交；结论被推翻时用同标题提交新结论替代。没有需要保存的内容时，只回复“无需记录”，不要复述本轮工作。`,
+  ].join('\n');
+}
+
+function selfCheckEnabled(stores, env = process.env) {
+  const flag = env.MEMHUB_SELF_CHECK;
+  if (flag !== undefined) return !['0', 'false'].includes(flag);
+  try {
+    return JSON.parse(fs.readFileSync(path.join(stores.globalDir, 'config.json'), 'utf8'))?.selfCheck?.enabled !== false;
+  } catch {
+    return true;
+  }
+}
+
 function renderProtocol({ load = 'memory_load', search = 'memory_search', propose = 'memory_propose', forget = 'memory_forget' } = {}) {
   return [
     'MemHub 记忆协议：',
@@ -948,6 +969,9 @@ module.exports = {
   renderBootBlock,
   renderProtocol,
   MEMORY_WRITE_RULES,
+  SELF_CHECK_MARKER,
+  selfCheckPrompt,
+  selfCheckEnabled,
   redactSecrets,
   loadEntryById,
   proposeMemory,

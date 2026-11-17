@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { safeReadText, atomicWriteText, safeRemove, withStoreTransaction } = require('./fs-safe');
 const { serializeEntry } = require('./markdown');
-const { redactSecrets, resolveStores } = require('./store');
+const { redactSecrets, resolveStores, SELF_CHECK_MARKER } = require('./store');
 const { modelConfig, chatCompletion } = require('./rerank');
 
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
@@ -68,10 +68,23 @@ function compactToolText(text) {
   return `${text.slice(0, TOOL_TEXT_LIMIT)}\n…（已截断：原文 ${text.length} 字符，sha256 ${hash(text).slice(0, 16)}）`;
 }
 
+function stripSelfCheckRuns(messages) {
+  const out = [];
+  let skipping = false;
+  for (const m of messages) {
+    const isToolResult = Array.isArray(m?.content) && m.content.some(p => p?.type === 'tool_result');
+    if (m?.role === 'user' && !isToolResult) {
+      skipping = String(m.text ?? contentText(m.content ?? m.parts)).trimStart().startsWith(SELF_CHECK_MARKER);
+    }
+    if (!skipping) out.push(m);
+  }
+  return out;
+}
+
 function normalizeSessionMessages(messages = []) {
   const occurrences = new Map();
   const out = [];
-  const expanded = messages.flatMap(m => {
+  const expanded = stripSelfCheckRuns(messages).flatMap(m => {
     const parts = Array.isArray(m?.content) ? m.content : [];
     const tools = parts.flatMap((p, index) => {
       if (!['tool_result', 'tool_use', 'toolCall'].includes(p?.type)) return [];

@@ -13,7 +13,6 @@ const CLAUDE_HOOK_EVENTS = [
   ['PostToolUse', 'Edit|Write|MultiEdit|NotebookEdit|Read'],
   ['PostToolUseFailure', null],
   ['Stop', null],
-  ['SessionEnd', null],
 ];
 const CODEX_START = '# >>> memhub-mcp >>>';
 const CODEX_END = '# <<< memhub-mcp <<<';
@@ -113,9 +112,10 @@ function isMemhubHookEntry(entry) {
 }
 
 function addClaudeHooks(cfg) {
+  cfg = removeClaudeHooks(cfg);
   cfg.hooks = cfg.hooks && typeof cfg.hooks === 'object' ? cfg.hooks : {};
   for (const [event, matcher] of CLAUDE_HOOK_EVENTS) {
-    const list = (Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : []).filter(entry => !isMemhubHookEntry(entry));
+    const list = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
     list.push({
       ...(matcher ? { matcher } : {}),
       hooks: [{ type: 'command', command: `node ${JSON.stringify(MEMHUB_BIN)} hook claude-code --event ${event}`, timeout: 10 }],

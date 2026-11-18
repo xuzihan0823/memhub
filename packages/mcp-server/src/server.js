@@ -9,18 +9,18 @@ const PROPOSE_ITEM_SCHEMA = {
   properties: {
     title: { type: 'string', description: 'State the conclusion itself, e.g. "生产镜像必须指定 linux/amd64".' },
     summary: { type: 'string', description: 'One line: when / under which conditions it applies.' },
-    content: { type: 'string', description: 'Full text. For handoffs use: 目标 / 验收标准 (- [ ] / - [x] + 证据) / 下一步 / 阻塞 / 相关文件.' },
+    content: { type: 'string', description: 'Full text. Handoffs: 目标 / 当前进度 / 验收标准 / 下一步 / 阻塞 / 相关文件. Record stage-only updates too; mark missing details 未提供, do not invent them.' },
     keywords: { type: 'array', items: { type: 'string' } },
     triggers: { type: 'array', items: { type: 'string' }, description: 'Situations and synonyms that should recall this memory (e.g. 上线, 部署, docker build).' },
-    paths: { type: 'array', items: { type: 'string' }, description: 'Optional project-relative globs this memory is tied to (e.g. packages/daemon/**).' },
+    paths: { type: 'array', items: { type: 'string' }, description: 'Project-relative globs for retrieval only; use cwd to choose the destination project.' },
     scope: {
       type: 'string',
       enum: ['global', 'project', 'handoff'],
-      description: 'global: still true in any project. project: true only for this repo. handoff: cross-session task state that stops mattering once the task ends.',
+      description: 'global: durable knowledge valid across projects. project: durable knowledge for the target repo. handoff: changing project stage, latest progress, TODOs or task state.',
     },
     type: { type: 'string', enum: ['user', 'pref', 'skill', 'decision', 'project', 'note', 'handoff'] },
     salience: { type: 'integer', minimum: 1, maximum: 3, description: '1 = always relevant, 3 = rarely.' },
-    task: { type: 'string', description: 'Handoff only: stable task key (branch or short task name). Same key updates the same handoff in place.' },
+    task: { type: 'string', description: 'Handoff only: use project-status for the project current stage, or a distinct fixed key per concrete task. Same key updates in place.' },
     status: { type: 'string', enum: ['active', 'blocked', 'done', 'abandoned'], description: 'Handoff only. done requires every acceptance item checked with evidence.' },
     ttl_days: { type: 'integer', minimum: 1, description: 'Handoff only: expire after N days without update (default 14).' },
   },
@@ -35,6 +35,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         cwd: { type: 'string', description: 'Current workspace path (optional).' },
+        origin_agent: { type: 'string' },
+        source_session_id: { type: 'string' },
       },
     },
   },
@@ -66,11 +68,11 @@ const TOOLS = [
   },
   {
     name: 'memory_propose',
-    description: 'Write long-term memory or update a task handoff. Long-term: only what stays true after the task ends (global if true in any project, else project); same title supersedes the old conclusion. Handoff (scope="handoff"): cross-session task state keyed by task; resubmitting the same task updates it in place, status done/abandoned archives it. Commits directly unless requireReview is true.',
+    description: 'Pass an items array to save durable memory or update a handoff. Current project stage, latest progress, TODOs and PR state belong in scope="handoff", task="project-status", not global long-term memory. Set cwd to the verified target project even when this session is in another workspace; use separate calls for different projects. Long-term: only durable lessons grounded in user messages or tool output; never infer user traits or save setup failures, transient errors or unverified attempts. Same title supersedes old conclusions; same task updates handoffs in place; done/abandoned archives them. Commits directly unless requireReview is true.',
     inputSchema: {
       type: 'object',
       properties: {
-        cwd: { type: 'string' },
+        cwd: { type: 'string', description: 'Verified target project root, including another workspace. Defaults to the session directory. paths does not select the store.' },
         agent: { type: 'string' },
         requireReview: { type: 'boolean', description: 'Optional: queue to inbox instead of committing immediately.' },
         items: { type: 'array', minItems: 1, maxItems: 5, items: PROPOSE_ITEM_SCHEMA },
@@ -93,6 +95,7 @@ const TOOLS = [
       required: ['id'],
     },
   },
+  ...core.SESSION_TOOLS,
 ];
 
 async function handleToolCall(name, args = {}, defaults = {}) {
@@ -102,9 +105,14 @@ async function handleToolCall(name, args = {}, defaults = {}) {
     cwd: args.cwd || defaults.cwd || process.cwd(),
   });
 
+  if (name.startsWith('memory_session_')) {
+    return { content: [{ type: 'text', text: JSON.stringify(await core.handleSessionTool(name, stores, args), null, 2) }] };
+  }
+
   if (name === 'memory_boot') {
     await core.scaffoldGlobalStore(stores.globalDir);
-    const boot = await core.bootContext(stores, { tools: TOOL_NAMES });
+    const session = args.source_session_id ? { origin_agent: args.origin_agent || 'mcp-client', source_session_id: args.source_session_id } : undefined;
+    const boot = await core.bootContext(stores, { tools: TOOL_NAMES, session });
     return { content: [{ type: 'text', text: core.renderBootBlock(boot) }] };
   }
 

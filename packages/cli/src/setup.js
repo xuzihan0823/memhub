@@ -112,9 +112,10 @@ function isMemhubHookEntry(entry) {
 }
 
 function addClaudeHooks(cfg) {
+  cfg = removeClaudeHooks(cfg);
   cfg.hooks = cfg.hooks && typeof cfg.hooks === 'object' ? cfg.hooks : {};
   for (const [event, matcher] of CLAUDE_HOOK_EVENTS) {
-    const list = (Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : []).filter(entry => !isMemhubHookEntry(entry));
+    const list = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
     list.push({
       ...(matcher ? { matcher } : {}),
       hooks: [{ type: 'command', command: `node ${JSON.stringify(MEMHUB_BIN)} hook claude-code --event ${event}`, timeout: 10 }],
@@ -198,14 +199,16 @@ async function installForAgent(agentId, { homeDir = os.homedir(), dryRun = false
     const srcCore = path.resolve(__dirname, '../../core/src');
     const destPlugin = path.join(homeDir, '.pi-desktop', 'plugins', 'installed', 'memhub.universal-memory');
     if (dryRun) return [{ filePath: destPlugin, action: 'would-copy-plugin', from: srcPlugin }];
-    await fsp.mkdir(path.join(destPlugin, 'core', 'src'), { recursive: true });
-    for (const f of ['manifest.json', 'main.js', 'extension.js', 'README.md']) {
+    const manifest = JSON.parse(await fsp.readFile(path.join(srcPlugin, 'manifest.json'), 'utf8'));
+    const destCore = path.join(destPlugin, 'core', manifest.version, 'src');
+    await fsp.mkdir(destCore, { recursive: true });
+    for (const f of new Set(['manifest.json', 'main.js', 'extension.js', 'README.md', ...(manifest.contributes?.agentExtensions || [])])) {
       if (fs.existsSync(path.join(srcPlugin, f))) {
         await fsp.copyFile(path.join(srcPlugin, f), path.join(destPlugin, f));
       }
     }
     for (const f of fs.readdirSync(srcCore).filter(name => name.endsWith('.js'))) {
-      await fsp.copyFile(path.join(srcCore, f), path.join(destPlugin, 'core', 'src', f));
+      await fsp.copyFile(path.join(srcCore, f), path.join(destCore, f));
     }
     return [{ filePath: destPlugin, action: 'installed-plugin' }];
   }

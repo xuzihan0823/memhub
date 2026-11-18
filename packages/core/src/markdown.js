@@ -88,9 +88,7 @@ function formatYamlValue(val) {
   if (Array.isArray(val)) {
     return `[${val.map(v => JSON.stringify(String(v))).join(', ')}]`;
   }
-  const s = String(val);
-  if (/[:#\[\]{}&*!|>'"%@`]|^\s|\s$/.test(s) || s === '') return JSON.stringify(s);
-  return s;
+  return JSON.stringify(String(val));
 }
 
 function serializeEntry(meta, body) {
@@ -131,10 +129,14 @@ function basenameNoExt(relPath) {
   return String(relPath).split('/').pop().replace(/\.md$/i, '');
 }
 
+function textField(value) {
+  return ['string', 'number', 'boolean'].includes(typeof value) ? String(value).trim() : '';
+}
+
 function parseEntry(relPath, raw, { scope, rootDir, readOnly = false }) {
   const { data, body } = parseFrontmatter(raw);
-  const title = typeof data.title === 'string' && data.title.trim() ? data.title.trim() : basenameNoExt(relPath);
-  const id = typeof data.id === 'string' && data.id.trim() ? data.id.trim() : `${scope}:${basenameNoExt(relPath)}`;
+  const title = textField(data.title) || basenameNoExt(relPath);
+  const id = textField(data.id) || `${scope}:${basenameNoExt(relPath)}`;
   const summary = clip(String(data.summary || data.description || firstMeaningfulLine(body) || title), 120);
   const salienceNum = Number(data.salience);
   const salience = [1, 2, 3].includes(salienceNum) ? salienceNum : 2;

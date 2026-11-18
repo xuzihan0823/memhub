@@ -166,13 +166,11 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     const notes = [];
     const pending = await core.listInboxBatches(stores);
     if (pending.length) notes.push(`MemHub 提示：当前有 ${pending.length} 条待审批记忆提案，可运行 memhub ui 处理。`);
-    const shouldNudge = state.wrote && !state.handoffTouched && !payload.stop_hook_active && process.env.MEMHUB_STOP_NUDGE !== '0';
+    const handoffHint = state.wrote && !state.handoffTouched;
     writeState(file, { ...state, wrote: false });
-    if (shouldNudge) {
-      return JSON.stringify({
-        decision: 'block',
-        reason: '本轮修改了文件或执行了命令，但还没有更新任务交接单。若任务未全部完成，请调用 memory_propose 提交 scope="handoff" 的交接单（固定 task 键，写明验收标准勾选情况与下一步）；若已全部完成且有证据，提交 status="done" 并先沉淀可复用经验；若本轮只是一次性小改动无需交接，直接结束即可。',
-      });
+    if (!payload.stop_hook_active && core.selfCheckEnabled(stores)) {
+      const hint = handoffHint ? '\n本轮修改了文件但还没有更新任务交接单；任务未完成时请先提交 scope="handoff" 交接单。' : '';
+      return JSON.stringify({ decision: 'block', reason: `${core.selfCheckPrompt()}${hint}`, ...(notes.length ? { systemMessage: notes.join('\n') } : {}) });
     }
     return notes.length ? JSON.stringify({ systemMessage: notes.join('\n') }) : NO_OUTPUT;
   }

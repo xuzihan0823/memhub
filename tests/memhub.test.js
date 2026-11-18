@@ -138,7 +138,7 @@ test('daemon + web-ui + mcp-server: end-to-end HTTP and JSON-RPC 2.0', async () 
     assert.equal(initRpc.result.serverInfo.name, 'memhub');
 
     const listRpc = await processRpcMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { homeDir, globalDir, cwd: repoDir });
-    assert.equal(listRpc.result.tools.length, 5);
+    assert.deepEqual(listRpc.result.tools.filter(tool => tool.name.startsWith('memory_session_')).map(tool => tool.name).sort(), ['memory_session_capture', 'memory_session_list', 'memory_session_load', 'memory_session_restore', 'memory_session_status']);
 
     const bootRpc = await processRpcMessage({
       jsonrpc: '2.0',
@@ -594,7 +594,7 @@ test('hook: session boot, compact reset, tool-failure retrieval, and Stop handof
     await run('UserPromptSubmit', { prompt: '再改一下' });
     await run('PostToolUse', { tool_name: 'Edit', tool_input: { file_path: path.join(repoDir, 'src', 'b.js') } });
     await run('PostToolUse', { tool_name: 'mcp__memhub__memory_propose', tool_input: { items: [{ scope: 'handoff', title: 't', content: 'c' }] } });
-    assert.deepEqual(JSON.parse(await run('Stop', { stop_hook_active: false })), {});
+    assert.doesNotMatch(JSON.parse(await run('Stop', { stop_hook_active: false })).reason, /还没有更新任务交接单/);
   } finally {
     if (prevRerank !== undefined) process.env.MEMHUB_RERANK_URL = prevRerank;
     await fsp.rm(base, { recursive: true, force: true });
@@ -606,7 +606,10 @@ test('cli setup: uninstall removes only memhub entries and keeps later user edit
   try {
     const settingsPath = path.join(homeDir, '.claude', 'settings.json');
     await fsp.mkdir(path.dirname(settingsPath), { recursive: true });
-    await fsp.writeFile(settingsPath, JSON.stringify({ model: 'sonnet', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }] } }));
+    await fsp.writeFile(settingsPath, JSON.stringify({ model: 'sonnet', hooks: {
+      Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }],
+      SessionEnd: [{ hooks: [{ type: 'command', command: 'node "/old/memhub/packages/cli/bin/memhub.js" hook claude-code --event SessionEnd' }] }],
+    } }));
     await fsp.writeFile(path.join(homeDir, '.claude.json'), JSON.stringify({ projects: { a: 1 }, mcpServers: { other: { command: 'x' } } }));
 
     await installForAgent('claude', { homeDir });
@@ -614,6 +617,7 @@ test('cli setup: uninstall removes only memhub entries and keeps later user edit
     const installed = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     assert.equal(installed.hooks.Stop.length, 2);
     assert.equal(installed.hooks.PostToolUseFailure.length, 1);
+    assert.equal(installed.hooks.SessionEnd, undefined);
 
     installed.theme = 'dark';
     fs.writeFileSync(settingsPath, JSON.stringify(installed));
@@ -686,5 +690,290 @@ test('adapter: pi-desktop injects boot catalog once and retrieves after failing 
     if (prevGlobal === undefined) delete process.env.MEMHUB_GLOBAL_DIR;
     else process.env.MEMHUB_GLOBAL_DIR = prevGlobal;
     await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('core: concurrent proposals serialize the whole read-modify-write', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    const stores = () => core.resolveStores({ homeDir, globalDir, cwd: repoDir });
+    const handoffs = await Promise.all([1, 2, 3].map(n => core.proposeMemory(stores(), {
+      agent: `a${n}`,
+      items: [{ scope: 'handoff', task: 'feat-x', title: `任务X ${n}`, content: `进度 ${n}` }],
+    })));
+    assert.deepEqual(handoffs.map(r => r.committed[0].action).sort(), ['create', 'update', 'update']);
+
+    const sameTitle = await Promise.all([1, 2].map(n => core.proposeMemory(stores(), {
+      items: [{ scope: 'global', type: 'skill', title: '同名经验', content: `版本 ${n}` }],
+    })));
+    const ids = sameTitle.map(r => r.committed[0].id);
+    assert.notEqual(ids[0], ids[1]);
+
+    const projectLog = await fsp.readFile(path.join(repoDir, '.memory', 'log.md'), 'utf8');
+    assert.equal(projectLog.split('\n').filter(l => l.includes('handoff-')).length, 3);
+    const all = await core.loadAllEntries(stores());
+    assert.equal(all.filter(e => e.scope === 'handoff').length, 1);
+    assert.equal(all.filter(e => e.title === '同名经验' && core.isActiveEntry(e)).length, 1);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('core: frontmatter round-trips hostile and scalar-looking strings', async () => {
+  const { base, homeDir, globalDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: base });
+    const res = await core.proposeMemory(stores, { items: [
+      { scope: 'global', type: 'skill', title: '正常标题', summary: 'x\n---\nstatus: deprecated', content: '正文' },
+      { scope: 'global', type: 'decision', title: '2024', content: '数字标题' },
+      { scope: 'global', type: 'decision', title: 'true', content: '布尔标题' },
+    ] });
+    const entries = await core.loadAllEntries(stores);
+    const byId = id => entries.find(e => e.id === id);
+    const [hostile, year, bool] = res.committed.map(c => byId(c.id));
+    assert.equal(hostile.status, 'active');
+    assert.equal(hostile.summary, 'x --- status: deprecated');
+    assert.equal(hostile.body, '正文');
+    assert.equal(year.title, '2024');
+    assert.equal(bool.title, 'true');
+
+    await fsp.writeFile(path.join(globalDir, 'skills', 'hand.md'), '---\ntitle: 404\n---\n手写');
+    assert.equal((await core.loadAllEntries(stores)).find(e => e.relPath === 'skills/hand.md').title, '404');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('core: rejects secrets and invisible characters before writing', async () => {
+  const { base, homeDir, globalDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: base });
+    const propose = content => core.proposeMemory(stores, { items: [{ scope: 'global', title: '凭据', content }] });
+    await assert.rejects(() => propose('key sk-abcdefghijklmnopqrstuvwxyz123456'), /API Key/);
+    await assert.rejects(() => propose('-----BEGIN OPENSSH PRIVATE KEY-----'), /私钥/);
+    await assert.rejects(() => propose('password = hunter2hunter2hunter2'), /凭据赋值/);
+    await assert.rejects(() => propose('看起来正常\u200b'), /不可见/);
+    await propose('Key 路径：~/.ssh/staging_ed25519，端口 2222');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('search: english terms match on word boundaries, CJK stays substring', () => {
+  const entry = (id, title) => ({ id, title, summary: '', body: '', keywords: [], triggers: [], status: 'active', salience: 2, scope: 'global' });
+  const entries = [entry('noise', 'Rapid prototyping with Goodreads'), entry('real', 'Go API 网关 rate-limit')];
+  assert.deepEqual(core.searchEntries(entries, 'go api', { strict: true }).map(h => h.entry.id), ['real']);
+  assert.deepEqual(core.searchEntries(entries, 'limit', {}).map(h => h.entry.id), ['real']);
+  assert.deepEqual(core.searchEntries(entries, '网关配置', {}).map(h => h.entry.id), ['real']);
+});
+
+test('core: archiving a global handoff keeps the global index title', async () => {
+  const { base, homeDir, globalDir } = await makeTempWorkspace();
+  try {
+    const outside = path.join(homeDir, 'Desktop', 'plan');
+    await fsp.mkdir(outside, { recursive: true });
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: outside });
+    const res = await core.proposeMemory(stores, { items: [{ scope: 'handoff', task: 't', title: '临时任务', content: '- [ ] a' }] });
+    await core.forgetEntry(stores, { id: res.committed[0].id, mode: 'archive' });
+    assert.match(await fsp.readFile(path.join(globalDir, 'index.md'), 'utf8'), /^# 全局记忆路由表/);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+function withEnv(vars, fn) {
+  const prev = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  const restore = () => {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+  return Promise.resolve().then(fn).finally(restore);
+}
+
+test('self-check: claude Stop asks the same agent to self-check once per run and can be disabled', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  const cacheDir = path.join(base, 'cache');
+  const run = (event, payload = {}) => runHook({
+    event,
+    payload: { cwd: repoDir, session_id: 's-self', stop_hook_active: false, ...payload },
+    homeDir, globalDir, cacheDir, fetchImpl: null,
+  });
+  try {
+    await run('SessionStart', { source: 'startup' });
+    await run('UserPromptSubmit', { prompt: '以后提交信息都用中文' });
+    const stop = JSON.parse(await run('Stop'));
+    assert.equal(stop.decision, 'block');
+    assert.ok(stop.reason.startsWith(core.SELF_CHECK_MARKER));
+    assert.match(stop.reason, /memory_propose/);
+    assert.match(stop.reason, /无需记录/);
+    assert.doesNotMatch(stop.reason, /交接单。$/);
+    assert.deepEqual(JSON.parse(await run('Stop', { stop_hook_active: true })), {});
+
+    await withEnv({ MEMHUB_SELF_CHECK: '0' }, async () => {
+      assert.deepEqual(JSON.parse(await run('Stop')), {});
+    });
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(path.join(globalDir, 'config.json'), JSON.stringify({ selfCheck: { enabled: false } }));
+    assert.deepEqual(JSON.parse(await run('Stop')), {});
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('self-check: pi-desktop queues one self-check after a settled run and keeps it out of journals', async () => {
+  const { base, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir }, async () => {
+      const extPath = path.resolve(__dirname, '../adapters/pi-desktop/extension.js');
+      delete require.cache[require.resolve(extPath)];
+      const { onProviderRequest, onAgentEnd, onAgentSettled, TOOLS } = require(extPath)._internals;
+      const sent = [];
+      const pi = { sendUserMessage: async text => { sent.push(text); } };
+      const ctx = { cwd: repoDir, sessionId: 'pi-self' };
+      const turn = [
+        { role: 'user', content: '以后部署前都先跑 smoke 测试', timestamp: 1700000000000 },
+        { role: 'assistant', content: [{ type: 'text', text: '收到' }], timestamp: 1700000001000 },
+      ];
+
+      await onAgentEnd({ messages: turn }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 1);
+      assert.ok(sent[0].startsWith(core.SELF_CHECK_MARKER));
+      assert.match(sent[0], new RegExp(TOOLS.propose));
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 1);
+
+      const checkTurn = [
+        { role: 'user', content: sent[0], timestamp: 1700000002000 },
+        { role: 'assistant', content: [{ type: 'text', text: '无需记录' }], timestamp: 1700000003000 },
+      ];
+      const checkPayload = await onProviderRequest({ payload: { messages: [...turn, checkTurn[0]] } }, ctx);
+      assert.equal(checkPayload.messages.at(-1).content, sent[0]);
+      await onAgentEnd({ messages: checkTurn }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 1);
+
+      await onAgentEnd({ messages: [{ role: 'user', content: '下一个问题', timestamp: 1700000004000 }] }, ctx);
+      await onAgentSettled({ aborted: true }, ctx, pi);
+      assert.equal(sent.length, 1);
+
+      const stores = core.resolveStores({ globalDir, cwd: repoDir });
+      const [session] = await core.listSessions(stores);
+      const texts = (await core.loadSession(stores, { session_key: session.session_key })).messages.map(m => m.text);
+      assert.deepEqual(texts, ['以后部署前都先跑 smoke 测试', '收到', '下一个问题']);
+    });
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('model config: file works without shell exports and environment overrides it', async () => {
+  const { base, globalDir } = await makeTempWorkspace();
+  const env = { MEMHUB_GLOBAL_DIR: globalDir };
+  const file = path.join(globalDir, 'config.json');
+  const RERANK_ENV = { MEMHUB_RERANK_URL: 'https://example.com/v1', MEMHUB_RERANK_MODEL: 'small' };
+  try {
+    assert.equal(core.rerankConfig(env), null);
+    await fsp.mkdir(globalDir, { recursive: true });
+    await fsp.writeFile(file, JSON.stringify({ review: { url: 'http://x/v1', model: 'ignored' }, rerank: {
+      url: 'http://127.0.0.1:3425/v1/', model: 'example/light-model', reasoningEffort: 'low', timeoutMs: 60000,
+    } }));
+    const config = core.rerankConfig(env);
+    assert.equal(config.url, 'http://127.0.0.1:3425/v1/chat/completions');
+    assert.equal(config.model, 'example/light-model');
+    assert.equal(config.reasoningEffort, 'low');
+    assert.equal(config.apiKey, '');
+    assert.equal(core.reviewConfig, undefined);
+
+    const override = core.rerankConfig({ ...env, ...RERANK_ENV, MEMHUB_RERANK_REASONING_EFFORT: 'none' });
+    assert.equal(override.url, 'https://example.com/v1/chat/completions');
+    assert.equal(override.model, 'small');
+    assert.equal(override.reasoningEffort, 'none');
+    assert.equal(core.rerankConfig({ ...env, MEMHUB_RERANK_ENABLED: '0' }), null);
+
+    let request;
+    const text = await core.chatCompletion(config, [{ role: 'user', content: '测试' }], {
+      maxTokens: 1500,
+      fetchImpl: async (url, init) => {
+        request = { url, ...init, body: JSON.parse(init.body) };
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"items":[]}' } }] }) };
+      },
+    });
+    assert.equal(text, '{"items":[]}');
+    assert.equal(request.body.reasoning_effort, 'low');
+    assert.equal(request.headers['User-Agent'], 'memhub/1');
+    assert.equal(request.headers.Authorization, undefined);
+
+    await fsp.writeFile(file, JSON.stringify({ rerank: { enabled: false, url: config.url, model: config.model } }));
+    assert.equal(core.rerankConfig(env), null);
+    assert.ok(core.rerankConfig({ ...env, MEMHUB_RERANK_ENABLED: '1' }));
+    await fsp.writeFile(file, '{broken');
+    assert.equal(core.rerankConfig(env), null);
+    assert.equal(core.rerankConfig({ ...env, ...RERANK_ENV }).model, 'small');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('adapter: project progress targets another workspace and updates only its handoff', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  const targetDir = path.join(base, 'target');
+  const otherDir = path.join(base, 'other');
+  await fsp.mkdir(path.join(targetDir, '.git'), { recursive: true });
+  await fsp.mkdir(path.join(otherDir, '.git'), { recursive: true });
+  try {
+    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir }, async () => {
+      const { tools } = require('../adapters/pi-desktop/main')._internals;
+      const ctx = { cwd: repoDir, sessionId: 'cross-project-test' };
+      const progress = content => ({ scope: 'handoff', task: 'project-status', title: '项目当前进度', content });
+      const first = await tools.propose({ cwd: targetDir, items: [progress('进入动作细调阶段')] }, ctx);
+      assert.equal(first.committed[0].rootDir, path.join(targetDir, '.memory'));
+      assert.equal(fs.existsSync(path.join(repoDir, '.memory')), false);
+      const second = await tools.propose({ cwd: targetDir, items: [progress('继续细调，翻页动作已完成')] }, ctx);
+      assert.equal(second.committed[0].action, 'update');
+      assert.equal(second.committed[0].id, first.committed[0].id);
+      await tools.propose({ cwd: otherDir, items: [progress('已公开仓库并宣传')] }, ctx);
+
+      const stores = cwd => core.resolveStores({ homeDir, globalDir, cwd });
+      const targetEntries = await core.loadAllEntries(stores(targetDir));
+      assert.equal(targetEntries.filter(e => e.scope === 'handoff').length, 1);
+      assert.equal(targetEntries.filter(e => e.scope === 'global').length, 0);
+      assert.match((await tools.load({ cwd: targetDir, id: first.committed[0].id }, ctx)).content, /翻页动作已完成/);
+      assert.equal((await tools.search({ cwd: targetDir, query: '翻页动作' }, ctx)).hits[0].scope, 'handoff');
+      assert.match(core.renderBootBlock(await core.bootContext(stores(targetDir))), /翻页动作已完成/);
+      assert.doesNotMatch(core.renderBootBlock(await core.bootContext(stores(repoDir))), /翻页动作已完成|已公开仓库并宣传/);
+      assert.doesNotMatch(core.renderBootBlock(await core.bootContext(stores(otherDir))), /翻页动作已完成/);
+
+      await tools.propose({ items: [{ ...progress('当前会话的进度'), paths: [targetDir] }] }, ctx);
+      assert.match((await core.loadAllEntries(stores(repoDir))).find(e => e.scope === 'handoff').body, /当前会话的进度/);
+      assert.equal((await core.loadAllEntries(stores(targetDir))).filter(e => e.scope === 'handoff').length, 1);
+      await assert.rejects(tools.propose({ cwd: 'target', items: [progress('错误目录')] }, ctx), /absolute path/);
+      await assert.rejects(tools.propose({ cwd: path.join(base, 'missing'), items: [progress('错误目录')] }, ctx), /existing project directory/);
+      const emptyDir = path.join(base, 'empty');
+      await fsp.mkdir(emptyDir);
+      await assert.rejects(tools.propose({ cwd: emptyDir, items: [progress('错误目录')] }, ctx), /does not identify a project/);
+      assert.equal(fs.existsSync(path.join(emptyDir, '.memory')), false);
+
+      await tools.forget({ cwd: targetDir, id: first.committed[0].id, mode: 'deprecate', reason: '测试结束' }, ctx);
+      assert.equal((await tools.load({ cwd: targetDir, id: first.committed[0].id }, ctx)).status, 'deprecated');
+      assert.equal((await core.loadAllEntries(stores(otherDir))).find(e => e.scope === 'handoff').status, 'active');
+    });
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('protocol: project progress uses targeted handoffs rather than global long-term memory', () => {
+  const protocol = core.renderProtocol();
+  assert.match(protocol, /最新进度.*不属于长期记忆/);
+  assert.match(protocol, /task="project-status"/);
+  assert.match(protocol, /cwd 参数决定目标项目/);
+  assert.match(protocol, /未提供.*不要编造/);
+  assert.match(core.selfCheckPrompt(), /写入对应项目的短期交接/);
+  for (const tool of require('../adapters/pi-desktop/manifest.json').contributes.agentTools) {
+    assert.equal(tool.schema.properties.cwd.type, 'string');
   }
 });

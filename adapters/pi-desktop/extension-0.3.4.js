@@ -17,7 +17,7 @@ const boots = new Map();
 const sessions = new Map();
 
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.3/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.4/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}

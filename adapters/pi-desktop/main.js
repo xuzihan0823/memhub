@@ -7,7 +7,7 @@ const DEFAULT_BASE = 'http://127.0.0.1:4789';
 const AGENT = 'pi-desktop';
 
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.3/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.4/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}
@@ -60,12 +60,13 @@ const tools = {
     const query = String(args?.query || '');
     if (core) {
       const entries = await core.loadAllEntries(core.resolveStores({ cwd }));
-      const hits = core.searchEntries(entries, query, { scope: args?.scope, limit: clampLimit(args?.limit) });
+      const hits = core.searchEntries(entries, query, { scope: args?.scope, type: args?.type, limit: clampLimit(args?.limit) });
       return { query, hits: hits.map(h => ({ id: h.entry.id, scope: h.entry.scope, type: h.entry.type, title: h.entry.title, summary: h.entry.summary, score: h.score })) };
     }
     const qs = new URLSearchParams({ q: query });
     if (cwd) qs.set('cwd', cwd);
     if (args?.scope) qs.set('scope', args.scope);
+    if (args?.type) qs.set('type', args.type);
     if (args?.limit) qs.set('limit', String(args.limit));
     return callDaemon(`/api/search?${qs}`);
   },

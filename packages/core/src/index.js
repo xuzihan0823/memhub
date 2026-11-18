@@ -9,4 +9,5 @@ module.exports = {
   ...require('./retrieve'),
   ...require('./sessions'),
   ...require('./session-api'),
+  ...require('./usage'),
 };

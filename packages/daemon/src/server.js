@@ -99,12 +99,13 @@ function createServer({ homeDir, globalDir, defaultCwd } = {}) {
         const stores = getStores(url.searchParams.get('cwd'));
         const q = url.searchParams.get('q') || '';
         const scope = url.searchParams.get('scope') || undefined;
+        const type = url.searchParams.get('type') || undefined;
         const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 8, 1), 30);
         const strict = url.searchParams.get('strict') === 'true';
         const excludeRaw = url.searchParams.get('exclude') || '';
         const exclude = excludeRaw ? new Set(excludeRaw.split(',').map(s => s.trim()).filter(Boolean)) : undefined;
         const entries = await core.loadAllEntries(stores);
-        const hits = core.searchEntries(entries, q, { scope, limit, strict, exclude });
+        const hits = core.searchEntries(entries, q, { scope, type, limit, strict, exclude });
         sendJson(res, 200, {
           query: q,
           hits: hits.map(h => ({

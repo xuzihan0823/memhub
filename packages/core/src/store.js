@@ -10,7 +10,6 @@ const {
   INACTIVE_STATUSES,
   HANDOFF_STATUSES,
   todayStr,
-  daysSince,
   parseFrontmatter,
   serializeEntry,
   parseEntry,
@@ -27,6 +26,7 @@ const {
   classifyProposal,
   renderMemoryContext,
   renderMemoryCatalog,
+  findEntryByRef,
 } = require('./search');
 const {
   safeReadText,
@@ -35,6 +35,7 @@ const {
   walkMarkdownFiles,
   withStoreTransaction,
 } = require('./fs-safe');
+const { readUsage, recordUsage, idleDays, isDormant, REVIEW_DAYS } = require('./usage');
 
 const GLOBAL_CONTENT_DIRS = ['user', 'skills', 'decisions', 'projects', 'concepts', 'handoffs'];
 const PROJECT_CONTENT_DIRS = ['project.md', 'projects', 'decisions', 'handoffs', 'skills'];
@@ -348,7 +349,7 @@ async function bootContext(stores, { maxSoulChars = 1500, archiveExpired = true,
     protocol: renderProtocol(tools),
     activeHandoffs: handoffs.map(e => `- [${e.id}] (${e.status}${e.task ? ` | task:${e.task}` : ''}) ${e.title} — ${e.summary}`),
     handoffDetails: handoffs.slice(0, 2).map(e => ({ id: e.id, title: e.title, status: e.status, task: e.task, updated_at: e.updated_at, body: clip(e.body, 1500) })),
-    catalog: renderMemoryCatalog(entries, { loadTool: tools?.load }),
+    catalog: renderMemoryCatalog(entries, { loadTool: tools?.load, searchTool: tools?.search, usage: await readUsage(stores) }),
     archivedHandoffs,
     totalEntries: entries.length,
   };
@@ -375,24 +376,13 @@ function renderBootBlock(boot) {
 }
 
 async function touchEntryAccess(stores, entry) {
-  if (!entry || entry.readOnly || !entry.rootDir) return;
-  const today = todayStr();
-  if (entry.last_access === today) return;
-  try {
-    await withStoreTransaction(stores.globalDir, async () => {
-      const raw = await safeReadText(entry.rootDir, entry.relPath);
-      const { data, body } = parseFrontmatter(raw);
-      data.last_access = today;
-      await atomicWriteText(entry.rootDir, entry.relPath, serializeEntry(data, body));
-    });
-  } catch {
-    // non-fatal
-  }
+  if (!entry || entry.readOnly) return;
+  await recordUsage(stores, [entry.id], 'load');
 }
 
 async function loadEntryById(stores, id, { touchAccess = true } = {}) {
   const entries = await loadAllEntries(stores);
-  const found = entries.find(e => e.id === id);
+  const found = findEntryByRef(entries, id);
   if (!found) return null;
   if (touchAccess) await touchEntryAccess(stores, found);
   return found;
@@ -824,7 +814,7 @@ function forgetEntry(stores, options = {}) {
 
 async function forgetEntryLocked(stores, { id, mode = 'deprecate', reason = '', confirm = false } = {}) {
   const entries = await loadAllEntries(stores);
-  const target = entries.find(e => e.id === id);
+  const target = findEntryByRef(entries, id);
   if (!target) throw new Error(`Memory entry not found: ${id}`);
   if (target.readOnly) throw new Error(`Entry is read-only: ${id}`);
 
@@ -888,6 +878,7 @@ async function upsertSoul(globalDir, { agentName, userAddress, persona, boundari
 async function lintStore(stores) {
   const entries = await loadAllEntries(stores);
   const idSet = new Set(entries.map(e => e.id));
+  const usage = await readUsage(stores);
   const issues = [];
 
   for (const e of entries) {
@@ -897,9 +888,8 @@ async function lintStore(stores) {
     if (isHandoffExpired(e) && !INACTIVE_STATUSES.has(e.status)) {
       issues.push({ level: 'warn', id: e.id, code: 'expired_handoff', message: `交接单 ${e.id} 已超过 TTL(${e.ttl_days}天)，下次会话启动时将自动归档` });
     }
-    const ageDays = daysSince(e.last_access || e.created_at);
-    if (e.salience === 3 && ageDays !== null && ageDays > 90 && isActiveEntry(e)) {
-      issues.push({ level: 'info', id: e.id, code: 'stale_cold_memory', message: `冷记忆 ${e.id} 已 ${ageDays} 天未访问，建议归档` });
+    if (isActiveEntry(e) && isDormant(e, usage, { days: REVIEW_DAYS })) {
+      issues.push({ level: 'info', id: e.id, code: 'stale_cold_memory', message: `${e.id} 已 ${idleDays(e, usage)} 天未被加载或注入，确认无用后可用 forget(mode="archive") 归档` });
     }
     for (const relId of e.related) {
       if (!relId.includes('/') && !idSet.has(relId)) {

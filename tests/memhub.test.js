@@ -555,6 +555,105 @@ test('retrieval: boot catalog, triggers, short follow-ups, paths, and optional r
   }
 });
 
+test('catalog: short refs, per-type overflow hint, type browsing, and ref resolution', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: repoDir });
+    for (let i = 0; i < 12; i++) {
+      await core.proposeMemory(stores, { items: [{ title: `部署经验第${i}条：上线前检查端口`, content: `正文 ${i}`, scope: 'global', type: i % 2 ? 'skill' : 'decision', salience: i === 0 ? 1 : 2 }] });
+    }
+    const entries = await core.loadAllEntries(stores);
+    const full = core.renderMemoryCatalog(entries);
+    const refs = [...full.matchAll(/^- \[([0-9a-f]{6})\] 部署经验/gm)].map(m => m[1]);
+    assert.equal(refs.length, 12);
+    assert.doesNotMatch(full, /^- \[(global|project) \|/m);
+    assert.doesNotMatch(full, /另有/);
+
+    const loaded = await core.loadEntryById(stores, refs[0], { touchAccess: false });
+    assert.equal(core.shortRef(loaded.id), refs[0]);
+    assert.equal((await core.loadEntryById(stores, loaded.id, { touchAccess: false })).id, loaded.id);
+    assert.equal(await core.loadEntryById(stores, 'ffffff', { touchAccess: false }), null);
+
+    const small = core.renderMemoryCatalog(entries, { maxChars: 700, searchTool: 'plugin_search' });
+    assert.ok(small.length <= 700, `catalog length ${small.length}`);
+    assert.match(small, /部署经验第0条/);
+    assert.match(small, /另有 \d+ 条未列出（[^）]*(skill|decision) \d+[^）]*）：用 plugin_search\(type\)/);
+
+    const browse = core.searchEntries(entries, '', { type: 'skill', limit: 20 });
+    assert.equal(browse.length, 6);
+    assert.ok(browse.every(h => h.entry.type === 'skill'));
+    assert.deepEqual(core.searchEntries(entries, '', {}), []);
+
+    const seen = new Map();
+    let pair = null;
+    for (let i = 0; !pair; i++) {
+      const id = `clash-${i}`;
+      const ref = core.shortRef(id);
+      if (seen.has(ref)) pair = [seen.get(ref), id];
+      else seen.set(ref, id);
+    }
+    const twins = pair.map((id, n) => ({ ...entries[0], id, title: `撞车条目${n}` }));
+    const twinCatalog = core.renderMemoryCatalog(twins);
+    assert.match(twinCatalog, new RegExp(`\\[${pair[0]}\\]`));
+    assert.match(twinCatalog, new RegExp(`\\[${pair[1]}\\]`));
+    assert.equal(core.findEntryByRef(twins, core.shortRef(pair[0])), null);
+    assert.equal(core.findEntryByRef(twins, pair[1]).id, pair[1]);
+
+    const forgot = await core.forgetEntry(stores, { id: refs[1], mode: 'deprecate' });
+    assert.equal(forgot.status, 'deprecated');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('usage: load and injection go to state/usage.json, dormant entries sink in catalog and wake on use', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: repoDir });
+    const old = isoDaysAgo(200);
+    await writeEntry(globalDir, 'skills/old-skill.md', { id: 'old-skill', scope: 'global', type: 'skill', title: '旧经验 nginx 反向代理', summary: '旧', salience: 2, status: 'active', created_at: old, updated_at: old, last_access: old });
+    await writeEntry(globalDir, 'skills/old-core.md', { id: 'old-core', scope: 'global', type: 'skill', title: '核心约束', summary: '始终相关', salience: 1, status: 'active', created_at: old, updated_at: old });
+    await writeEntry(globalDir, 'user/old-pref.md', { id: 'old-pref', scope: 'global', type: 'user', title: '用户偏好中文', summary: '偏好', salience: 2, status: 'active', created_at: old, updated_at: old });
+    await writeEntry(globalDir, 'skills/fresh.md', { id: 'fresh', scope: 'global', type: 'skill', title: '新经验', summary: '新', salience: 2, status: 'active', created_at: core.todayStr(), updated_at: core.todayStr() });
+
+    let entries = await core.loadAllEntries(stores);
+    const byId = id => entries.find(e => e.id === id);
+    assert.equal(core.isDormant(byId('old-skill'), {}), true);
+    assert.equal(core.isDormant(byId('old-core'), {}), false);
+    assert.equal(core.isDormant(byId('old-pref'), {}), false);
+    assert.equal(core.isDormant(byId('fresh'), {}), false);
+
+    const catalog = core.renderMemoryCatalog(entries);
+    const order = [...catalog.matchAll(/^- \[[^\]]+\] (.+?)(?: — .*)?$/gm)].map(m => m[1]);
+    assert.equal(order.at(-1), '旧经验 nginx 反向代理');
+    const lint = await core.lintStore(stores);
+    assert.deepEqual(lint.issues.filter(i => i.code === 'stale_cold_memory').map(i => i.id), ['old-skill']);
+
+    const before = await fsp.readFile(path.join(globalDir, 'skills/old-skill.md'), 'utf8');
+    await core.loadEntryById(stores, 'old-skill');
+    assert.equal(await fsp.readFile(path.join(globalDir, 'skills/old-skill.md'), 'utf8'), before);
+    let usage = await core.readUsage(stores);
+    assert.equal(usage['old-skill'].loads, 1);
+    assert.equal(await fsp.readFile(path.join(globalDir, 'state/.gitignore'), 'utf8'), '*\n!.gitignore\n');
+
+    const injected = await core.retrieveContext(stores, { query: 'nginx 反向代理怎么配', rerank: null });
+    assert.ok(injected.ids.includes('old-skill'));
+    usage = await core.readUsage(stores);
+    assert.equal(usage['old-skill'].injections, 1);
+
+    entries = await core.loadAllEntries(stores);
+    assert.equal(core.isDormant(byId('old-skill'), usage), false);
+    assert.equal((await core.lintStore(stores)).issues.filter(i => i.code === 'stale_cold_memory').length, 0);
+
+    await fsp.writeFile(path.join(globalDir, 'state/usage.json'), '{broken');
+    assert.deepEqual(await core.readUsage(stores), {});
+    await core.loadEntryById(stores, 'fresh');
+    assert.equal((await core.readUsage(stores)).fresh.loads, 1);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
 test('hook: session boot, compact reset, tool-failure retrieval, and Stop handoff nudge', async () => {
   const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
   const cacheDir = path.join(base, 'cache');

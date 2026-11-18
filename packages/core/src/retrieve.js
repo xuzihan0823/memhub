@@ -4,6 +4,7 @@ const { isActiveEntry } = require('./markdown');
 const { searchEntries, matchEntriesByPath, buildRetrievalQuery, renderMemoryContext, termGroups } = require('./search');
 const { loadAllEntries } = require('./store');
 const { rerankConfig, rerankWithModel } = require('./rerank');
+const { recordUsage } = require('./usage');
 
 async function retrieveContext(stores, {
   query = '',
@@ -48,6 +49,7 @@ async function retrieveContext(stores, {
   }
 
   const hits = [...pathHits, ...textHits];
+  await recordUsage(stores, hits.map(h => h.entry.id), 'inject');
   return {
     ids: hits.map(h => h.entry.id),
     block: renderMemoryContext(hits, loadTool),

@@ -22,6 +22,8 @@
 - `status`：`active`（进行中）、`blocked`（等用户或外部条件）、`done`（验收标准全部勾选且有证据）、`abandoned`（用户放弃）。`done` / `abandoned` 会自动移入 `archive/`。
 - `ttl_days`（默认 14）从最后一次更新起算，过期后不再被检索，并在下次会话启动时自动归档。
 
+**遗忘**：被 `load` 或自动注入时，只在 `~/.memory/state/usage.json`（不进 Git）记录最后使用时间和次数，不改写记忆文件。90 天没被加载、注入或更新的记忆进入休眠：在 Boot 目录里排到最后，目录装不下时先被挤掉，但仍能被检索；一旦再被注入或加载就自动恢复。重要程度 1 和用户偏好不休眠。休眠超过 180 天的会出现在 `memhub lint` 里，确认无用后再用 `forget(mode="archive")` 归档；系统不会自动归档或删除长期记忆。
+
 ## 记忆怎么读
 
 1. **会话开始**：注入 `<memory-boot>`，包含 SOUL、记忆协议、当前目录的活跃交接单（最近两份附正文），以及全部长期记忆的标头目录 `<memory-catalog>`。Claude Code 在上下文压缩（`compact`）或 `clear` 后会重新注入。目录每条用 6 位短引用（如 `[a1b2c3]`）代替完整 ID，`load` / `forget` 都接受短引用；超过上限时按类别给出未列条数，Agent 可用 `search(type=...)` 不带 query 浏览该类别。

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "memhub.universal-memory",
   "name": "MemHub Universal Memory",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Shared local memory with per-turn conversation capture, previous-session restore, independent optional summaries, and memory/session tools. Requires bundled core for automatic conversation capture.",
   "license": "MIT",
   "engines": {
@@ -29,12 +29,12 @@
   "safetyNotes": "Reads and writes local memory and redacted conversation journals (~/.memory and <project>/.memory). Sessions are excluded from Git and are never automatically deleted. After each completed run, queues one memory self-check message for the same agent (disable with selfCheck.enabled=false or MEMHUB_SELF_CHECK=0); that run is excluded from saved journals. Optional model endpoints use config.json rerank/summary sections or MEMHUB_RERANK_* / MEMHUB_SUMMARY_*; summary calls send redacted dialogue to the separately configured endpoint. Physical deletion requires confirm=true.",
   "contributes": {
     "agentExtensions": [
-      "extension-0.3.3.js"
+      "extension-0.3.4.js"
     ],
     "agentTools": [
       {
         "name": "search",
-        "description": "Search global and project memories by query. Returns IDs, scopes, titles, and one-line summaries (no bodies).",
+        "description": "Search global and project memories by query, or list one category by passing type (or scope) without query. Returns IDs, scopes, titles, and one-line summaries (no bodies).",
         "risk": "low",
         "schema": {
           "type": "object",
@@ -54,20 +54,22 @@
                 "handoff"
               ]
             },
+            "type": {
+              "type": "string",
+              "enum": ["user", "pref", "skill", "decision", "project", "note", "spec"],
+              "description": "Filter by memory type; without query it lists that category."
+            },
             "limit": {
               "type": "integer",
               "minimum": 1,
               "maximum": 20
             }
-          },
-          "required": [
-            "query"
-          ]
+          }
         }
       },
       {
         "name": "load",
-        "description": "Load full Markdown content of one memory entry by exact ID and update last_access.",
+        "description": "Load full Markdown content of one memory entry by ID or the short ref shown in the catalog, and update last_access.",
         "risk": "low",
         "schema": {
           "type": "object",

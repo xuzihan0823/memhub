@@ -42,21 +42,21 @@ const TOOLS = [
   },
   {
     name: 'memory_search',
-    description: 'Search global and project memories by query. Returns IDs, scopes, titles, and one-line summaries (no bodies).',
+    description: 'Search global and project memories by query, or list one category by passing type (or scope) without query. Returns IDs, scopes, titles, and one-line summaries (no bodies).',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string' },
         cwd: { type: 'string' },
         scope: { type: 'string', enum: ['global', 'project', 'handoff'] },
+        type: { type: 'string', enum: ['user', 'pref', 'skill', 'decision', 'project', 'note', 'spec'], description: 'Filter by memory type; without query it lists that category.' },
         limit: { type: 'integer', minimum: 1, maximum: 20 },
       },
-      required: ['query'],
     },
   },
   {
     name: 'memory_load',
-    description: 'Load full Markdown content of one memory entry by exact ID and update last_access.',
+    description: 'Load full Markdown content of one memory entry by ID or the short ref shown in the catalog, and update last_access.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -120,6 +120,7 @@ async function handleToolCall(name, args = {}, defaults = {}) {
     const entries = await core.loadAllEntries(stores);
     const hits = core.searchEntries(entries, String(args.query || ''), {
       scope: args.scope,
+      type: args.type,
       limit: Number.isInteger(args.limit) ? args.limit : 8,
     });
     const out = hits.map(h => ({

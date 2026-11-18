@@ -1,3 +1,3 @@
 'use strict';
 
-module.exports = require('./extension-0.3.3');
+module.exports = require('./extension-0.3.4');

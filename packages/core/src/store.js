@@ -27,6 +27,7 @@ const {
   classifyProposal,
   renderMemoryContext,
   renderMemoryCatalog,
+  findEntryByRef,
 } = require('./search');
 const {
   safeReadText,
@@ -348,7 +349,7 @@ async function bootContext(stores, { maxSoulChars = 1500, archiveExpired = true,
     protocol: renderProtocol(tools),
     activeHandoffs: handoffs.map(e => `- [${e.id}] (${e.status}${e.task ? ` | task:${e.task}` : ''}) ${e.title} — ${e.summary}`),
     handoffDetails: handoffs.slice(0, 2).map(e => ({ id: e.id, title: e.title, status: e.status, task: e.task, updated_at: e.updated_at, body: clip(e.body, 1500) })),
-    catalog: renderMemoryCatalog(entries, { loadTool: tools?.load }),
+    catalog: renderMemoryCatalog(entries, { loadTool: tools?.load, searchTool: tools?.search }),
     archivedHandoffs,
     totalEntries: entries.length,
   };
@@ -392,7 +393,7 @@ async function touchEntryAccess(stores, entry) {
 
 async function loadEntryById(stores, id, { touchAccess = true } = {}) {
   const entries = await loadAllEntries(stores);
-  const found = entries.find(e => e.id === id);
+  const found = findEntryByRef(entries, id);
   if (!found) return null;
   if (touchAccess) await touchEntryAccess(stores, found);
   return found;
@@ -824,7 +825,7 @@ function forgetEntry(stores, options = {}) {
 
 async function forgetEntryLocked(stores, { id, mode = 'deprecate', reason = '', confirm = false } = {}) {
   const entries = await loadAllEntries(stores);
-  const target = entries.find(e => e.id === id);
+  const target = findEntryByRef(entries, id);
   if (!target) throw new Error(`Memory entry not found: ${id}`);
   if (target.readOnly) throw new Error(`Entry is read-only: ${id}`);
 

@@ -555,6 +555,57 @@ test('retrieval: boot catalog, triggers, short follow-ups, paths, and optional r
   }
 });
 
+test('catalog: short refs, per-type overflow hint, type browsing, and ref resolution', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: repoDir });
+    for (let i = 0; i < 12; i++) {
+      await core.proposeMemory(stores, { items: [{ title: `部署经验第${i}条：上线前检查端口`, content: `正文 ${i}`, scope: 'global', type: i % 2 ? 'skill' : 'decision', salience: i === 0 ? 1 : 2 }] });
+    }
+    const entries = await core.loadAllEntries(stores);
+    const full = core.renderMemoryCatalog(entries);
+    const refs = [...full.matchAll(/^- \[([0-9a-f]{6})\] 部署经验/gm)].map(m => m[1]);
+    assert.equal(refs.length, 12);
+    assert.doesNotMatch(full, /^- \[(global|project) \|/m);
+    assert.doesNotMatch(full, /另有/);
+
+    const loaded = await core.loadEntryById(stores, refs[0], { touchAccess: false });
+    assert.equal(core.shortRef(loaded.id), refs[0]);
+    assert.equal((await core.loadEntryById(stores, loaded.id, { touchAccess: false })).id, loaded.id);
+    assert.equal(await core.loadEntryById(stores, 'ffffff', { touchAccess: false }), null);
+
+    const small = core.renderMemoryCatalog(entries, { maxChars: 700, searchTool: 'plugin_search' });
+    assert.ok(small.length <= 700, `catalog length ${small.length}`);
+    assert.match(small, /部署经验第0条/);
+    assert.match(small, /另有 \d+ 条未列出（[^）]*(skill|decision) \d+[^）]*）：用 plugin_search\(type\)/);
+
+    const browse = core.searchEntries(entries, '', { type: 'skill', limit: 20 });
+    assert.equal(browse.length, 6);
+    assert.ok(browse.every(h => h.entry.type === 'skill'));
+    assert.deepEqual(core.searchEntries(entries, '', {}), []);
+
+    const seen = new Map();
+    let pair = null;
+    for (let i = 0; !pair; i++) {
+      const id = `clash-${i}`;
+      const ref = core.shortRef(id);
+      if (seen.has(ref)) pair = [seen.get(ref), id];
+      else seen.set(ref, id);
+    }
+    const twins = pair.map((id, n) => ({ ...entries[0], id, title: `撞车条目${n}` }));
+    const twinCatalog = core.renderMemoryCatalog(twins);
+    assert.match(twinCatalog, new RegExp(`\\[${pair[0]}\\]`));
+    assert.match(twinCatalog, new RegExp(`\\[${pair[1]}\\]`));
+    assert.equal(core.findEntryByRef(twins, core.shortRef(pair[0])), null);
+    assert.equal(core.findEntryByRef(twins, pair[1]).id, pair[1]);
+
+    const forgot = await core.forgetEntry(stores, { id: refs[1], mode: 'deprecate' });
+    assert.equal(forgot.status, 'deprecated');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
 test('hook: session boot, compact reset, tool-failure retrieval, and Stop handoff nudge', async () => {
   const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
   const cacheDir = path.join(base, 'cache');

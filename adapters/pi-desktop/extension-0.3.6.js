@@ -14,10 +14,10 @@ const MAX_TOOL_INJECTIONS_PER_SESSION = 20;
 
 const injections = new Map();
 const boots = new Map();
+const nudges = new Map();
 const sessions = new Map();
-
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.5/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.6/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}
@@ -40,7 +40,7 @@ const sessionIdOf = ctx => {
 
 function sessionState(ctx) {
   const key = `${sessionIdOf(ctx)}\0${ctx?.cwd || ''}`;
-  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, turnsSinceSelfCheck: 0, lastPayloadChars: 0, proposeCalledInTurn: false, selfCheckDue: false });
+  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, turnsSinceNudge: 0, compactPending: false });
   return sessions.get(key);
 }
 
@@ -154,7 +154,6 @@ async function onProviderRequest(event, ctx) {
 
   const keys = turnKeys(`${cwd}\0${sessionIdOf(ctx)}`, found.turns);
   const state = sessionState(ctx);
-  try { state.lastPayloadChars = JSON.stringify(payload[found.list]).length; } catch {}
   if (!boots.has(keys[0])) remember(boots, keys[0], await fetchBoot(cwd, ctx));
   const lastTurnKey = keys[keys.length - 1];
   const selfCheck = found.turns.at(-1).text.trimStart().startsWith(localCore?.SELF_CHECK_MARKER || '[memhub:self-check]');
@@ -176,10 +175,23 @@ async function onProviderRequest(event, ctx) {
     record.ids.forEach(id => state.ids.add(id));
     remember(injections, keys[lastIdx], record);
   }
+  if (!selfCheck && !nudges.has(lastTurnKey)) {
+    state.turnsSinceNudge += 1;
+    let nudge = null;
+    if (localCore) {
+      const cfg = localCore.selfCheckConfig(localCore.resolveStores({ cwd }));
+      if (cfg.enabled && (state.compactPending || state.turnsSinceNudge >= cfg.everyTurns)) {
+        nudge = localCore.renderMemoryNudge({ propose: TOOLS.propose, forget: TOOLS.forget, reason: state.compactPending ? 'compact' : 'interval' });
+        state.turnsSinceNudge = 0;
+        state.compactPending = false;
+      }
+    }
+    remember(nudges, lastTurnKey, nudge);
+  }
 
   let next = payload;
   found.turns.forEach((turn, i) => {
-    const blocks = [i === 0 ? boots.get(keys[0]) : null, injections.get(keys[i])?.block].filter(Boolean);
+    const blocks = [i === 0 ? boots.get(keys[0]) : null, injections.get(keys[i])?.block, nudges.get(keys[i])].filter(Boolean);
     if (blocks.length) next = appendBlock(next, found.list, turn, blocks.join('\n\n'));
   });
   return next === payload ? undefined : next;
@@ -196,7 +208,10 @@ async function onToolResult(event, ctx) {
   if (typeof cwd !== 'string' || !cwd || !event?.toolName) return undefined;
   const state = sessionState(ctx);
   const name = String(event.toolName).toLowerCase();
-  if ((name === 'propose' || name.endsWith('_propose')) && !event.isError) state.proposeCalledInTurn = true;
+  if ((name === 'propose' || name.endsWith('_propose') || name === 'forget' || name.endsWith('_forget')) && !event.isError) {
+    state.turnsSinceNudge = 0;
+    state.compactPending = false;
+  }
   if (state.toolInjections >= MAX_TOOL_INJECTIONS_PER_SESSION) return undefined;
   const input = event.input || {};
   const rawPath = typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : null;
@@ -247,44 +262,16 @@ async function captureMessages(messages, ctx) {
   }
 }
 
-function isSelfCheckRun(messages) {
-  const firstUser = (messages || []).find(m => m?.role === 'user');
-  const text = typeof firstUser?.content === 'string' ? firstUser.content
-    : Array.isArray(firstUser?.content) ? firstUser.content.filter(p => typeof p?.text === 'string').map(p => p.text).join('\n') : '';
-  return text.trimStart().startsWith(localCore?.SELF_CHECK_MARKER || '[memhub:self-check]');
-}
-
 async function onAgentEnd(event, ctx) {
   const result = await captureMessages(event?.messages || [], ctx);
   const state = sessionState(ctx);
   if (result?.status === 'saved' && localCore.summaryConfig(localCore.resolveStores({ cwd: ctx.cwd }))) {
     state.summary = Promise.resolve(state.summary).then(() => localCore.summarizeSession(localCore.resolveStores({ cwd: ctx.cwd }), { session_key: result.session_key })).catch(() => ({ status: 'failed' }));
   }
-  if (localCore && ctx?.cwd && event?.messages?.length && !isSelfCheckRun(event.messages)) {
-    if (state.proposeCalledInTurn) {
-      state.turnsSinceSelfCheck = 0;
-      state.proposeCalledInTurn = false;
-    } else {
-      state.turnsSinceSelfCheck = (state.turnsSinceSelfCheck || 0) + 1;
-    }
-    const cfg = localCore.selfCheckConfig(localCore.resolveStores({ cwd: ctx.cwd }));
-    state.selfCheckDue = Boolean(cfg.enabled && (state.turnsSinceSelfCheck >= cfg.everyTurns || state.lastPayloadChars >= cfg.contextChars));
-  } else {
-    state.selfCheckDue = false;
-  }
 }
 
-async function onAgentSettled(event, ctx, pi) {
-  const state = sessionState(ctx);
-  if (!state.selfCheckDue || event?.aborted || typeof pi?.sendUserMessage !== 'function') return;
-  state.selfCheckDue = false;
-  state.turnsSinceSelfCheck = 0;
-  state.lastPayloadChars = 0;
-  try {
-    await pi.sendUserMessage(localCore.selfCheckPrompt(TOOLS.propose));
-  } catch {
-    // host refused or session closed; next turn still runs normally
-  }
+function onSessionCompact(_event, ctx) {
+  if (ctx) sessionState(ctx).compactPending = true;
 }
 
 module.exports = function memhubExtension(pi) {
@@ -292,7 +279,7 @@ module.exports = function memhubExtension(pi) {
   pi.on('before_provider_request', (event, ctx) => onProviderRequest(event, ctx));
   pi.on('tool_result', (event, ctx) => onToolResult(event, ctx));
   pi.on('agent_end', (event, ctx) => onAgentEnd(event, ctx));
-  pi.on('agent_settled', (event, ctx) => onAgentSettled(event, ctx, pi));
+  pi.on('session_compact', (event, ctx) => onSessionCompact(event, ctx));
   pi.on('session_shutdown', (_event, ctx) => onAgentEnd({}, ctx));
 };
-module.exports._internals = { onProviderRequest, onToolResult, onAgentEnd, onAgentSettled, injections, boots, sessions, TOOLS };
+module.exports._internals = { onProviderRequest, onToolResult, onAgentEnd, onSessionCompact, injections, boots, nudges, sessions, TOOLS };

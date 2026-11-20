@@ -58,7 +58,8 @@ test('PI host loader: versioned entry replaces cached factory and saves/restores
   const newEntry = path.join(plugin, manifest.contributes.agentExtensions[0]);
   assert.notEqual(newEntry, legacyEntry);
   const a = await makeRunner(newEntry, 'a');
-  await a.emit('before_provider_request', { payload });
+  const first = await a.emit('before_provider_request', { payload });
+  assert.match(first.messages[0].content, /<memory-nudge/);
   await a.emit('agent_end', { messages: [{ role: 'user', content: 'loader probe', timestamp: 1700000000000 }, { role: 'assistant', content: [{ type: 'text', text: 'host reply' }], timestamp: 1700000001000 }] });
   const stores = core.resolveStores({ cwd, globalDir: process.env.MEMHUB_GLOBAL_DIR });
   const records = await core.listSessions(stores);
@@ -69,9 +70,7 @@ test('PI host loader: versioned entry replaces cached factory and saves/restores
   assert.match(restored.messages[0].content, /loader probe/);
   assert.match(restored.messages[0].content, /host reply/);
   await a.emit('agent_settled', { aborted: false });
-  assert.equal(queued.length, 1);
-  assert.equal(queued[0].sessionId, 'a');
-  assert.ok(queued[0].text.startsWith(core.SELF_CHECK_MARKER));
+  assert.equal(queued.length, 0);
   assert.deepEqual(a.getDiagnostics(), []);
   assert.deepEqual(b.getDiagnostics(), []);
 });

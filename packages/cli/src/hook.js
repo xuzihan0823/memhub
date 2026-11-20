@@ -111,7 +111,6 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     writeState(file, source === 'resume' ? { ...state, toolInjections: 0 } : fresh);
     return contextOutput('SessionStart', core.renderBootBlock(boot));
   }
-
   if (event === 'UserPromptSubmit') {
     const prompt = String(payload.prompt || payload.user_prompt || '').trim();
     state.turn += 1;
@@ -119,9 +118,16 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     state.toolInjections = 0;
     state.wrote = false;
     state.handoffTouched = false;
+    const cfg = core.selfCheckConfig(stores);
+    const nudgeDue = cfg.enabled && (state.compactPending || state.turnsSinceSelfCheck >= cfg.everyTurns);
+    const nudge = nudgeDue ? core.renderMemoryNudge({ reason: state.compactPending ? 'compact' : 'interval' }) : null;
+    if (nudgeDue) {
+      state.turnsSinceSelfCheck = 0;
+      state.compactPending = false;
+    }
     if (prompt.length < 2) {
       writeState(file, state);
-      return NO_OUTPUT;
+      return nudge ? contextOutput('UserPromptSubmit', nudge) : NO_OUTPUT;
     }
     const result = await core.retrieveContext(stores, {
       query: prompt,
@@ -131,15 +137,17 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     });
     state.ids.push(...result.ids);
     writeState(file, state);
-    return result.block ? contextOutput('UserPromptSubmit', result.block) : NO_OUTPUT;
+    const extra = [result.block, nudge].filter(Boolean).join('\n\n');
+    return extra ? contextOutput('UserPromptSubmit', extra) : NO_OUTPUT;
   }
 
   if (event === 'PostToolUse' || event === 'PostToolUseFailure') {
     const toolName = String(payload.tool_name || '');
     const toolInput = payload.tool_input || {};
     const failed = event === 'PostToolUseFailure';
-    if (/memory_propose$|_propose$/.test(toolName) && !failed) {
+    if (/memory_propose$|_propose$|memory_forget$|_forget$/.test(toolName) && !failed) {
       state.turnsSinceSelfCheck = 0;
+      state.compactPending = false;
       if (JSON.stringify(toolInput).includes('handoff')) state.handoffTouched = true;
     }
     if (EDIT_TOOLS.has(toolName) && !failed) state.wrote = true;
@@ -178,11 +186,14 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     if (pending.length) notes.push(`MemHub 提示：当前有 ${pending.length} 条待审批记忆提案，可运行 memhub ui 处理。`);
     const handoffHint = state.wrote && !state.handoffTouched;
     const cfg = core.selfCheckConfig(stores);
-    const due = !payload.stop_hook_active && cfg.enabled && (handoffHint || state.compactPending || state.turnsSinceSelfCheck >= cfg.everyTurns);
+    const due = !payload.stop_hook_active && cfg.enabled && handoffHint;
     writeState(file, { ...state, wrote: false, ...(due ? { turnsSinceSelfCheck: 0, compactPending: false } : {}) });
     if (due) {
-      const hint = handoffHint ? '\n本轮修改了文件但还没有更新任务交接单；任务未完成时请先提交 scope="handoff" 交接单。' : '';
-      return JSON.stringify({ decision: 'block', reason: `${core.selfCheckPrompt()}${hint}`, ...(notes.length ? { systemMessage: notes.join('\n') } : {}) });
+      return JSON.stringify({
+        decision: 'block',
+        reason: `${core.selfCheckPrompt()}\n本轮修改了文件但还没有更新任务交接单；任务未完成时请先提交 scope="handoff" 交接单。`,
+        ...(notes.length ? { systemMessage: notes.join('\n') } : {}),
+      });
     }
     return notes.length ? JSON.stringify({ systemMessage: notes.join('\n') }) : NO_OUTPUT;
   }

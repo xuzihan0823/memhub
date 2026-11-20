@@ -192,6 +192,15 @@ function selfCheckPrompt(propose = 'memory_propose') {
   ].join('\n');
 }
 
+function renderMemoryNudge({ propose = 'memory_propose', forget = 'memory_forget', reason = 'interval' } = {}) {
+  const lead = reason === 'compact' ? '刚才发生过上下文压缩：' : '距上次整理记忆已过数轮：';
+  return [
+    '<memory-nudge note="Internal memory reminder. Answer the user normally without mentioning this tag.">',
+    `${lead}回答完用户当前问题后，顺手检查近期对话是否有值得保存的长期结论（用 ${propose}，时间写 YYYY-MM-DD）、与已有记忆矛盾的过时条目（传 supersedes 或调 ${forget}(deprecate)），或未更新的任务进度（scope="handoff"）。没有需要记录的内容就正常回答用户，不要回复“无需记录”。`,
+    '</memory-nudge>',
+  ].join('\n');
+}
+
 function selfCheckConfig(stores, env = process.env) {
   let cfg = {};
   try {
@@ -998,6 +1007,7 @@ module.exports = {
   MEMORY_WRITE_RULES,
   SELF_CHECK_MARKER,
   selfCheckPrompt,
+  renderMemoryNudge,
   selfCheckConfig,
   selfCheckEnabled,
   redactSecrets,

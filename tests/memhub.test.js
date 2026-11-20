@@ -892,7 +892,7 @@ function withEnv(vars, fn) {
   return Promise.resolve().then(fn).finally(restore);
 }
 
-test('self-check: claude Stop throttles by turn interval, fires on PreCompact, and can be disabled', async () => {
+test('memory-nudge: claude injects hidden nudge into UserPromptSubmit on interval/PreCompact without blocking Stop', async () => {
   const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
   const cacheDir = path.join(base, 'cache');
   const run = (event, payload = {}) => runHook({
@@ -903,99 +903,84 @@ test('self-check: claude Stop throttles by turn interval, fires on PreCompact, a
   try {
     await run('SessionStart', { source: 'startup' });
     for (let i = 1; i <= 4; i++) {
-      await run('UserPromptSubmit', { prompt: `第 ${i} 轮普通问答` });
+      const u = JSON.parse(await run('UserPromptSubmit', { prompt: `第 ${i} 轮普通问答` }));
+      assert.doesNotMatch(u.hookSpecificOutput?.additionalContext || '', /<memory-nudge/);
       assert.deepEqual(JSON.parse(await run('Stop')), {});
     }
-    await run('UserPromptSubmit', { prompt: '以后提交信息都用中文' });
-    const stop = JSON.parse(await run('Stop'));
-    assert.equal(stop.decision, 'block');
-    assert.ok(stop.reason.startsWith(core.SELF_CHECK_MARKER));
-    assert.match(stop.reason, /memory_propose/);
-    assert.match(stop.reason, /YYYY-MM-DD/);
-    assert.match(stop.reason, /supersedes/);
-    assert.doesNotMatch(stop.reason, /交接单。$/);
-    assert.deepEqual(JSON.parse(await run('Stop', { stop_hook_active: true })), {});
+    const turn5 = JSON.parse(await run('UserPromptSubmit', { prompt: '以后提交信息都用中文' }));
+    const ctx5 = turn5.hookSpecificOutput?.additionalContext || '';
+    assert.match(ctx5, /<memory-nudge/);
+    assert.match(ctx5, /memory_propose/);
+    assert.match(ctx5, /YYYY-MM-DD/);
+    assert.match(ctx5, /supersedes/);
+    assert.deepEqual(JSON.parse(await run('Stop')), {});
 
     await run('PreCompact', {});
-    await run('UserPromptSubmit', { prompt: '压缩前再确认一句' });
-    assert.equal(JSON.parse(await run('Stop')).decision, 'block');
+    const afterCompact = JSON.parse(await run('UserPromptSubmit', { prompt: '压缩后继续' }));
+    assert.match(afterCompact.hookSpecificOutput?.additionalContext || '', /刚才发生过上下文压缩/);
 
     await withEnv({ MEMHUB_SELF_CHECK_EVERY_TURNS: '1' }, async () => {
-      await run('UserPromptSubmit', { prompt: '单轮也检查' });
-      assert.equal(JSON.parse(await run('Stop')).decision, 'block');
+      const single = JSON.parse(await run('UserPromptSubmit', { prompt: '单轮也提醒' }));
+      assert.match(single.hookSpecificOutput?.additionalContext || '', /<memory-nudge/);
+      assert.deepEqual(JSON.parse(await run('Stop')), {});
     });
 
     await withEnv({ MEMHUB_SELF_CHECK: '0', MEMHUB_SELF_CHECK_EVERY_TURNS: '1' }, async () => {
-      await run('UserPromptSubmit', { prompt: '关闭后不检查' });
-      assert.deepEqual(JSON.parse(await run('Stop')), {});
+      const off = JSON.parse(await run('UserPromptSubmit', { prompt: '关闭后不提醒' }));
+      assert.doesNotMatch(off.hookSpecificOutput?.additionalContext || '', /<memory-nudge/);
     });
     await fsp.mkdir(globalDir, { recursive: true });
     await fsp.writeFile(path.join(globalDir, 'config.json'), JSON.stringify({ selfCheck: { enabled: false, everyTurns: 1 } }));
-    await run('UserPromptSubmit', { prompt: '配置关闭' });
-    assert.deepEqual(JSON.parse(await run('Stop')), {});
+    const cfgOff = JSON.parse(await run('UserPromptSubmit', { prompt: '配置关闭' }));
+    assert.doesNotMatch(cfgOff.hookSpecificOutput?.additionalContext || '', /<memory-nudge/);
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
 
-test('self-check: pi-desktop throttles by interval, triggers near context limit, and keeps check out of journals', async () => {
+test('memory-nudge: pi-desktop injects hidden nudge into request on interval/compact without sendUserMessage or journal leak', async () => {
   const { base, globalDir, repoDir } = await makeTempWorkspace();
   try {
-    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir, MEMHUB_SELF_CHECK_EVERY_TURNS: '2', MEMHUB_SELF_CHECK_CONTEXT_CHARS: '2500' }, async () => {
+    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir, MEMHUB_SELF_CHECK_EVERY_TURNS: '2' }, async () => {
       const extPath = path.resolve(__dirname, '../adapters/pi-desktop/extension.js');
       delete require.cache[require.resolve(extPath)];
-      const { onProviderRequest, onToolResult, onAgentEnd, onAgentSettled, TOOLS } = require(extPath)._internals;
-      const sent = [];
-      const pi = { sendUserMessage: async text => { sent.push(text); } };
-      const ctx = { cwd: repoDir, sessionId: 'pi-self' };
-      const turn = (text, reply, ts) => [
-        { role: 'user', content: text, timestamp: ts },
-        { role: 'assistant', content: [{ type: 'text', text: reply }], timestamp: ts + 1000 },
+      const { onProviderRequest, onToolResult, onAgentEnd, onSessionCompact, TOOLS } = require(extPath)._internals;
+      const ctx = { cwd: repoDir, sessionId: 'pi-nudge' };
+
+      const p1 = await onProviderRequest({ payload: { messages: [{ role: 'user', content: '第一轮普通提问' }] } }, ctx);
+      assert.doesNotMatch(p1.messages[0].content, /<memory-nudge/);
+
+      const m2 = [
+        { role: 'user', content: '第一轮普通提问', timestamp: 1700000000000 },
+        { role: 'assistant', content: [{ type: 'text', text: '普通回答' }], timestamp: 1700000001000 },
+        { role: 'user', content: '以后部署前都先跑 smoke 测试', timestamp: 1700000002000 },
       ];
+      const p2 = await onProviderRequest({ payload: { messages: m2 } }, ctx);
+      assert.match(p2.messages[2].content, /<memory-nudge/);
+      assert.match(p2.messages[2].content, new RegExp(TOOLS.propose));
+      const p2Retry = await onProviderRequest({ payload: { messages: [...m2, { role: 'assistant', content: [{ type: 'text', text: 'tool call' }] }] } }, ctx);
+      assert.equal((p2Retry.messages[2].content.match(/<memory-nudge/g) || []).length, 1);
 
-      await onAgentEnd({ messages: turn('第一轮普通提问', '普通回答', 1700000000000) }, ctx);
-      await onAgentSettled({ aborted: false }, ctx, pi);
-      assert.equal(sent.length, 0);
-
-      const turn2 = turn('以后部署前都先跑 smoke 测试', '收到', 1700000002000);
-      await onAgentEnd({ messages: turn2 }, ctx);
-      await onAgentSettled({ aborted: false }, ctx, pi);
-      assert.equal(sent.length, 1);
-      assert.ok(sent[0].startsWith(core.SELF_CHECK_MARKER));
-      assert.match(sent[0], new RegExp(TOOLS.propose));
-      await onAgentSettled({ aborted: false }, ctx, pi);
-      assert.equal(sent.length, 1);
-
-      const checkTurn = [
-        { role: 'user', content: sent[0], timestamp: 1700000004000 },
-        { role: 'assistant', content: [{ type: 'text', text: '无需记录' }], timestamp: 1700000005000 },
-      ];
-      const checkPayload = await onProviderRequest({ payload: { messages: [...turn2, checkTurn[0]] } }, ctx);
-      assert.equal(checkPayload.messages.at(-1).content, sent[0]);
-      await onAgentEnd({ messages: checkTurn }, ctx);
-      await onAgentSettled({ aborted: false }, ctx, pi);
-      assert.equal(sent.length, 1);
-
+      const m3 = [...m2, { role: 'assistant', content: [{ type: 'text', text: '收到' }], timestamp: 1700000003000 }, { role: 'user', content: '第三轮主动写记忆', timestamp: 1700000004000 }];
+      const p3 = await onProviderRequest({ payload: { messages: m3 } }, ctx);
+      assert.doesNotMatch(p3.messages[4].content, /<memory-nudge/);
       await onToolResult({ toolName: TOOLS.propose, isError: false, input: { items: [] }, content: [] }, ctx);
-      await onAgentEnd({ messages: turn('主动写过记忆的一轮', '已记录', 1700000006000) }, ctx);
-      await onAgentSettled({ aborted: false }, ctx, pi);
-      assert.equal(sent.length, 1);
 
-      const bigTurn = turn('接近上下文上限的对话', '长回复'.repeat(1000), 1700000008000);
-      await onProviderRequest({ payload: { messages: bigTurn } }, ctx);
-      await onAgentEnd({ messages: bigTurn }, ctx);
-      await onAgentSettled({ aborted: false }, ctx, pi);
-      assert.equal(sent.length, 2);
+      const m4 = [...m3, { role: 'assistant', content: [{ type: 'text', text: '已记录' }], timestamp: 1700000005000 }, { role: 'user', content: '第四轮不该立刻再提醒', timestamp: 1700000006000 }];
+      const p4 = await onProviderRequest({ payload: { messages: m4 } }, ctx);
+      assert.doesNotMatch(p4.messages[6].content, /<memory-nudge/);
 
-      await onAgentEnd({ messages: [{ role: 'user', content: '下一个问题', timestamp: 1700000010000 }] }, ctx);
-      await onAgentSettled({ aborted: true }, ctx, pi);
-      assert.equal(sent.length, 2);
+      onSessionCompact({}, ctx);
+      const m5 = [...m4, { role: 'assistant', content: [{ type: 'text', text: '好的' }], timestamp: 1700000007000 }, { role: 'user', content: '压缩后第一轮', timestamp: 1700000008000 }];
+      const p5 = await onProviderRequest({ payload: { messages: m5 } }, ctx);
+      assert.match(p5.messages[8].content, /刚才发生过上下文压缩/);
 
+      await onAgentEnd({ messages: [...m5, { role: 'assistant', content: [{ type: 'text', text: '收到' }], timestamp: 1700000009000 }] }, ctx);
       const stores = core.resolveStores({ globalDir, cwd: repoDir });
       const [session] = await core.listSessions(stores);
       const texts = (await core.loadSession(stores, { session_key: session.session_key })).messages.map(m => m.text);
-      assert.ok(!texts.some(t => t.startsWith(core.SELF_CHECK_MARKER)));
-      assert.ok(texts.includes('下一个问题'));
+      assert.ok(texts.every(t => !t.includes('<memory-nudge')));
+      assert.ok(texts.includes('压缩后第一轮'));
     });
   } finally {
     await fsp.rm(base, { recursive: true, force: true });

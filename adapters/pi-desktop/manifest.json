@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "memhub.universal-memory",
   "name": "MemHub Universal Memory",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Shared local memory with per-turn conversation capture, previous-session restore, independent optional summaries, and memory/session tools. Requires bundled core for automatic conversation capture.",
   "license": "MIT",
   "engines": {
@@ -26,10 +26,10 @@
       "localhost"
     ]
   },
-  "safetyNotes": "Reads and writes local memory and redacted conversation journals (~/.memory and <project>/.memory). Sessions are excluded from Git and are never automatically deleted. After each completed run, queues one memory self-check message for the same agent (disable with selfCheck.enabled=false or MEMHUB_SELF_CHECK=0); that run is excluded from saved journals. Optional model endpoints use config.json rerank/summary sections or MEMHUB_RERANK_* / MEMHUB_SUMMARY_*; summary calls send redacted dialogue to the separately configured endpoint. Physical deletion requires confirm=true.",
+  "safetyNotes": "Reads and writes local memory and redacted conversation journals (~/.memory and <project>/.memory). Sessions are excluded from Git and are never automatically deleted. Every few turns or after compaction, injects one hidden <memory-nudge> reminder into the active request (disable with selfCheck.enabled=false or MEMHUB_SELF_CHECK=0); memory tags are stripped from saved journals. Optional model endpoints use config.json rerank/summary sections or MEMHUB_RERANK_* / MEMHUB_SUMMARY_*; summary calls send redacted dialogue to the separately configured endpoint. Physical deletion requires confirm=true.",
   "contributes": {
     "agentExtensions": [
-      "extension-0.3.5.js"
+      "extension-0.3.6.js"
     ],
     "agentTools": [
       {

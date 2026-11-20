@@ -5,6 +5,7 @@ const { searchEntries, matchEntriesByPath, buildRetrievalQuery, renderMemoryCont
 const { loadAllEntries } = require('./store');
 const { rerankConfig, rerankWithModel } = require('./rerank');
 const { recordUsage } = require('./usage');
+const { syncEntityIndex, entityLinkExpansion } = require('./entities');
 
 async function retrieveContext(stores, {
   query = '',
@@ -49,10 +50,15 @@ async function retrieveContext(stores, {
   }
 
   const hits = [...pathHits, ...textHits];
-  await recordUsage(stores, hits.map(h => h.entry.id), 'inject');
+  const entityIndex = hasQuery || hits.length ? await syncEntityIndex(stores, entries) : null;
+  const linked = entityIndex
+    ? entityLinkExpansion(entries, hits, fullQuery, entityIndex, { exclude: skip, maxLinked: 2 })
+    : [];
+  await recordUsage(stores, [...hits.map(h => h.entry.id), ...linked.map(l => l.entry.id)], 'inject');
   return {
     ids: hits.map(h => h.entry.id),
-    block: renderMemoryContext(hits, loadTool),
+    linkedIds: linked.map(l => l.entry.id),
+    block: renderMemoryContext(hits, loadTool, { linked }),
     mode,
   };
 }

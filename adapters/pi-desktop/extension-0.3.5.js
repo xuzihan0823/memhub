@@ -17,7 +17,7 @@ const boots = new Map();
 const sessions = new Map();
 
 function loadLocalCore() {
-  for (const rel of ['./core/0.3.4/src', '../../packages/core/src']) {
+  for (const rel of ['./core/0.3.5/src', '../../packages/core/src']) {
     const candidate = path.resolve(__dirname, rel, 'index.js');
     if (fs.existsSync(candidate)) {
       try { return require(candidate); } catch {}
@@ -40,7 +40,7 @@ const sessionIdOf = ctx => {
 
 function sessionState(ctx) {
   const key = `${sessionIdOf(ctx)}\0${ctx?.cwd || ''}`;
-  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, selfCheckDue: false });
+  if (!sessions.has(key)) remember(sessions, key, { ids: new Set(), dirs: new Set(), toolInjections: 0, turnsSinceSelfCheck: 0, lastPayloadChars: 0, proposeCalledInTurn: false, selfCheckDue: false });
   return sessions.get(key);
 }
 
@@ -154,6 +154,7 @@ async function onProviderRequest(event, ctx) {
 
   const keys = turnKeys(`${cwd}\0${sessionIdOf(ctx)}`, found.turns);
   const state = sessionState(ctx);
+  try { state.lastPayloadChars = JSON.stringify(payload[found.list]).length; } catch {}
   if (!boots.has(keys[0])) remember(boots, keys[0], await fetchBoot(cwd, ctx));
   const lastTurnKey = keys[keys.length - 1];
   const selfCheck = found.turns.at(-1).text.trimStart().startsWith(localCore?.SELF_CHECK_MARKER || '[memhub:self-check]');
@@ -194,9 +195,9 @@ async function onToolResult(event, ctx) {
   const cwd = ctx?.cwd;
   if (typeof cwd !== 'string' || !cwd || !event?.toolName) return undefined;
   const state = sessionState(ctx);
-  if (state.toolInjections >= MAX_TOOL_INJECTIONS_PER_SESSION) return undefined;
-
   const name = String(event.toolName).toLowerCase();
+  if ((name === 'propose' || name.endsWith('_propose')) && !event.isError) state.proposeCalledInTurn = true;
+  if (state.toolInjections >= MAX_TOOL_INJECTIONS_PER_SESSION) return undefined;
   const input = event.input || {};
   const rawPath = typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : null;
   let relFile = null;
@@ -259,14 +260,26 @@ async function onAgentEnd(event, ctx) {
   if (result?.status === 'saved' && localCore.summaryConfig(localCore.resolveStores({ cwd: ctx.cwd }))) {
     state.summary = Promise.resolve(state.summary).then(() => localCore.summarizeSession(localCore.resolveStores({ cwd: ctx.cwd }), { session_key: result.session_key })).catch(() => ({ status: 'failed' }));
   }
-  state.selfCheckDue = Boolean(localCore && ctx?.cwd && event?.messages?.length && !isSelfCheckRun(event.messages)
-    && localCore.selfCheckEnabled(localCore.resolveStores({ cwd: ctx.cwd })));
+  if (localCore && ctx?.cwd && event?.messages?.length && !isSelfCheckRun(event.messages)) {
+    if (state.proposeCalledInTurn) {
+      state.turnsSinceSelfCheck = 0;
+      state.proposeCalledInTurn = false;
+    } else {
+      state.turnsSinceSelfCheck = (state.turnsSinceSelfCheck || 0) + 1;
+    }
+    const cfg = localCore.selfCheckConfig(localCore.resolveStores({ cwd: ctx.cwd }));
+    state.selfCheckDue = Boolean(cfg.enabled && (state.turnsSinceSelfCheck >= cfg.everyTurns || state.lastPayloadChars >= cfg.contextChars));
+  } else {
+    state.selfCheckDue = false;
+  }
 }
 
 async function onAgentSettled(event, ctx, pi) {
   const state = sessionState(ctx);
   if (!state.selfCheckDue || event?.aborted || typeof pi?.sendUserMessage !== 'function') return;
   state.selfCheckDue = false;
+  state.turnsSinceSelfCheck = 0;
+  state.lastPayloadChars = 0;
   try {
     await pi.sendUserMessage(localCore.selfCheckPrompt(TOOLS.propose));
   } catch {

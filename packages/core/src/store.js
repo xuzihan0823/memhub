@@ -27,6 +27,7 @@ const {
   renderMemoryContext,
   renderMemoryCatalog,
   findEntryByRef,
+  shortRef,
 } = require('./search');
 const {
   safeReadText,
@@ -177,28 +178,36 @@ const MEMORY_WRITE_RULES = [
   '项目当前阶段、最新进度、待办、PR 状态和本轮工作结果不属于长期记忆，写入对应项目的短期交接；不能因为涉及另一个项目就写成 global。',
   '不要从话题、语气或用到的工具推断用户特质；一次性请求不算长期偏好，除非用户说了“以后都 / 记住 / 别再”。',
   '不写：环境没装好导致的失败（缺命令、未配置凭据）、“某工具不能用”这类否定结论、已自行恢复的偶发错误、一次性任务流水、没找到可行方法的尝试过程（只记确认可行的解法）。',
-  '踩坑写成“规则 + 一句原因”，不写 PR 号、日期和事故经过；同一结论只写一次，已有记忆不准时用同标题提交来替代，而不是另起一条。',
+  '踩坑写成“规则 + 一句原因”，不写 PR 号和事故经过；涉及时间时写绝对日期（YYYY-MM-DD），不写“上周 / 最近 / 目前”。同一结论只写一次；已有记忆不准或被推翻时，用同标题提交、传 supersedes 替代旧条目，或用 forget(deprecate) 废弃旧条目，不要新旧两条同时保留为有效。',
 ].join('');
 
 const SELF_CHECK_MARKER = '[memhub:self-check]';
 
 function selfCheckPrompt(propose = 'memory_propose') {
   return [
-    `${SELF_CHECK_MARKER} MemHub 记忆自检：回看自上一次记忆自检以来的对话，判断是否有需要保存的内容。`,
+    `${SELF_CHECK_MARKER} MemHub 记忆自检：回看自上一次记忆自检以来的对话，判断是否有需要保存或整理的内容。`,
     `长期记忆用 ${propose} 写入：${MEMORY_WRITE_RULES}`,
     '任务进度、待办和阻塞写 scope="handoff" 交接单（固定 task 键，按目标/进度/验收标准/下一步书写）；只是一次性小问答就不写。',
-    `已有记忆已覆盖的结论不要重复提交；结论被推翻时用同标题提交新结论替代。没有需要保存的内容时，只回复“无需记录”，不要复述本轮工作。`,
+    '已有记忆已覆盖的结论不要重复提交；若已有记忆与新事实矛盾或过时，用同标题覆盖、在 supersedes 填入旧条目 ID/短引用，或调用 forget(deprecate) 废弃旧条目。没有需要保存或修改的内容时，只回复“无需记录”，不要复述本轮工作。',
   ].join('\n');
 }
 
-function selfCheckEnabled(stores, env = process.env) {
-  const flag = env.MEMHUB_SELF_CHECK;
-  if (flag !== undefined) return !['0', 'false'].includes(flag);
+function selfCheckConfig(stores, env = process.env) {
+  let cfg = {};
   try {
-    return JSON.parse(fs.readFileSync(path.join(stores.globalDir, 'config.json'), 'utf8'))?.selfCheck?.enabled !== false;
-  } catch {
-    return true;
-  }
+    cfg = JSON.parse(fs.readFileSync(path.join(stores.globalDir, 'config.json'), 'utf8'))?.selfCheck || {};
+  } catch {}
+  const flag = env.MEMHUB_SELF_CHECK;
+  const enabled = flag !== undefined ? !['0', 'false'].includes(flag) : cfg?.enabled !== false;
+  const rawTurns = Number(env.MEMHUB_SELF_CHECK_EVERY_TURNS ?? cfg?.everyTurns ?? 5);
+  const everyTurns = Number.isInteger(rawTurns) && rawTurns >= 1 ? rawTurns : 5;
+  const rawChars = Number(env.MEMHUB_SELF_CHECK_CONTEXT_CHARS ?? cfg?.contextChars ?? 60000);
+  const contextChars = Number.isFinite(rawChars) && rawChars >= 2000 ? rawChars : 60000;
+  return { enabled, everyTurns, contextChars };
+}
+
+function selfCheckEnabled(stores, env = process.env) {
+  return selfCheckConfig(stores, env).enabled;
 }
 
 function renderProtocol({ load = 'memory_load', search = 'memory_search', propose = 'memory_propose', forget = 'memory_forget' } = {}) {
@@ -474,6 +483,7 @@ function validateItems(items, stores) {
       status: isHandoff && HANDOFF_STATUSES.includes(item.status) ? item.status : 'active',
       task: isHandoff ? normalizeTaskKey(item.task || title) : null,
       ttl_days: isHandoff ? (Number(item.ttl_days) > 0 ? Number(item.ttl_days) : 14) : null,
+      supersedes: isHandoff ? [] : asList(item?.supersedes).slice(0, 5),
     };
   });
 }
@@ -673,38 +683,57 @@ async function applyItemDecision(stores, entries, item, decision, agent) {
 
   await atomicWriteText(rootDir, relPath, serializeEntry(meta, item.content));
 
-  if ((action === 'supersede' || action === 'both-hold') && targetId) {
-    const old = entries.find(e => e.id === targetId && !e.readOnly);
-    if (old) {
-      try {
-        const oldRaw = await safeReadText(old.rootDir, old.relPath);
-        const parsedOld = parseFrontmatter(oldRaw);
-        if (action === 'supersede') {
-          parsedOld.data.status = 'deprecated';
-          parsedOld.data.supersededBy = newId;
-        } else {
-          const oldRel = asList(parsedOld.data.related);
-          if (!oldRel.includes(newId)) oldRel.push(newId);
-          parsedOld.data.related = oldRel;
-        }
-        parsedOld.data.updated_at = today;
-        await atomicWriteText(old.rootDir, old.relPath, serializeEntry(parsedOld.data, parsedOld.body));
-        if (old.rootDir !== rootDir) {
-          await rebuildIndexAndAppendLog(old.rootDir, [
-            `## [${today}] ${action} | ${old.id} -> ${newId}`,
-          ]);
-        }
-      } catch {
-        // non-fatal
+  const supersededIds = [];
+  const extraLogLines = [];
+  const markDeprecated = async (old, cause) => {
+    if (!old || old.readOnly || old.id === newId || old.scope === 'handoff') return;
+    try {
+      const oldRaw = await safeReadText(old.rootDir, old.relPath);
+      const parsedOld = parseFrontmatter(oldRaw);
+      if (cause === 'both-hold') {
+        const oldRel = asList(parsedOld.data.related);
+        if (!oldRel.includes(newId)) oldRel.push(newId);
+        parsedOld.data.related = oldRel;
+      } else {
+        parsedOld.data.status = 'deprecated';
+        parsedOld.data.supersededBy = newId;
+        old.status = 'deprecated';
+        old.supersededBy = newId;
+        supersededIds.push(old.id);
       }
+      parsedOld.data.updated_at = today;
+      await atomicWriteText(old.rootDir, old.relPath, serializeEntry(parsedOld.data, parsedOld.body));
+      if (old.rootDir !== rootDir) {
+        await rebuildIndexAndAppendLog(old.rootDir, [
+          `## [${today}] ${cause} | ${old.id} -> ${newId}`,
+        ]);
+      } else if (cause === 'supersede' && (action !== 'supersede' || old.id !== targetId)) {
+        extraLogLines.push(`## [${today}] supersede | ${old.id} -> ${newId}`);
+      }
+    } catch {
+      // non-fatal
     }
+  };
+
+  const explicitSupersedes = (item.supersedes || [])
+    .map(ref => findEntryByRef(entries, ref))
+    .filter(old => old && !old.readOnly && old.id !== newId && old.scope !== 'handoff');
+  const explicitIds = new Set(explicitSupersedes.map(e => e.id));
+
+  if ((action === 'supersede' || action === 'both-hold') && targetId && !explicitIds.has(targetId)) {
+    await markDeprecated(entries.find(e => e.id === targetId && !e.readOnly), action);
+  }
+  for (const old of explicitSupersedes) {
+    await markDeprecated(old, 'supersede');
   }
 
+  const finalAction = supersededIds.length && action === 'create' ? 'supersede' : action;
   await rebuildIndexAndAppendLog(rootDir, [
-    `## [${today}] ${action} | ${newId} — ${item.title} (by ${agent || 'agent'})`,
+    `## [${today}] ${finalAction} | ${newId} — ${item.title} (by ${agent || 'agent'})`,
+    ...extraLogLines,
   ]);
 
-  return { action, id: newId, scope, relPath, rootDir, targetId };
+  return { action: finalAction, id: newId, scope, relPath, rootDir, targetId, ...(supersededIds.length ? { supersededIds } : {}) };
 }
 
 function prepareItem(entries, stores, item, idx) {
@@ -740,7 +769,15 @@ async function proposeMemory(stores, { items, agent = 'unknown', sessionId = nul
       const committed = [];
       for (const [idx, item] of cleanItems.entries()) {
         const p = prepareItem(entries, stores, item, idx);
-        committed.push(await applyItemDecision(stores, entries, p.item, p.suggestion, agent));
+        const res = await applyItemDecision(stores, entries, p.item, p.suggestion, agent);
+        if (item.scope !== 'handoff' && !res.skipped) {
+          const deprecated = new Set([...(res.action === 'supersede' && res.targetId ? [res.targetId] : []), ...(res.supersededIds || [])]);
+          const related = p.similar
+            .filter(s => !deprecated.has(s.id))
+            .map(s => ({ id: s.id, ref: shortRef(s.id), title: s.title, summary: s.summary }));
+          if (related.length) res.similar = related;
+        }
+        committed.push(res);
       }
       return { status: 'committed', autoCommitted: true, committed };
     });
@@ -961,6 +998,7 @@ module.exports = {
   MEMORY_WRITE_RULES,
   SELF_CHECK_MARKER,
   selfCheckPrompt,
+  selfCheckConfig,
   selfCheckEnabled,
   redactSecrets,
   loadEntryById,

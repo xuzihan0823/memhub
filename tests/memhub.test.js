@@ -693,7 +693,7 @@ test('hook: session boot, compact reset, tool-failure retrieval, and Stop handof
     await run('UserPromptSubmit', { prompt: '再改一下' });
     await run('PostToolUse', { tool_name: 'Edit', tool_input: { file_path: path.join(repoDir, 'src', 'b.js') } });
     await run('PostToolUse', { tool_name: 'mcp__memhub__memory_propose', tool_input: { items: [{ scope: 'handoff', title: 't', content: 'c' }] } });
-    assert.doesNotMatch(JSON.parse(await run('Stop', { stop_hook_active: false })).reason, /还没有更新任务交接单/);
+    assert.doesNotMatch(JSON.parse(await run('Stop', { stop_hook_active: false })).reason || '', /还没有更新任务交接单/);
   } finally {
     if (prevRerank !== undefined) process.env.MEMHUB_RERANK_URL = prevRerank;
     await fsp.rm(base, { recursive: true, force: true });
@@ -892,7 +892,7 @@ function withEnv(vars, fn) {
   return Promise.resolve().then(fn).finally(restore);
 }
 
-test('self-check: claude Stop asks the same agent to self-check once per run and can be disabled', async () => {
+test('self-check: claude Stop throttles by turn interval, fires on PreCompact, and can be disabled', async () => {
   const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
   const cacheDir = path.join(base, 'cache');
   const run = (event, payload = {}) => runHook({
@@ -902,42 +902,63 @@ test('self-check: claude Stop asks the same agent to self-check once per run and
   });
   try {
     await run('SessionStart', { source: 'startup' });
+    for (let i = 1; i <= 4; i++) {
+      await run('UserPromptSubmit', { prompt: `第 ${i} 轮普通问答` });
+      assert.deepEqual(JSON.parse(await run('Stop')), {});
+    }
     await run('UserPromptSubmit', { prompt: '以后提交信息都用中文' });
     const stop = JSON.parse(await run('Stop'));
     assert.equal(stop.decision, 'block');
     assert.ok(stop.reason.startsWith(core.SELF_CHECK_MARKER));
     assert.match(stop.reason, /memory_propose/);
-    assert.match(stop.reason, /无需记录/);
+    assert.match(stop.reason, /YYYY-MM-DD/);
+    assert.match(stop.reason, /supersedes/);
     assert.doesNotMatch(stop.reason, /交接单。$/);
     assert.deepEqual(JSON.parse(await run('Stop', { stop_hook_active: true })), {});
 
-    await withEnv({ MEMHUB_SELF_CHECK: '0' }, async () => {
+    await run('PreCompact', {});
+    await run('UserPromptSubmit', { prompt: '压缩前再确认一句' });
+    assert.equal(JSON.parse(await run('Stop')).decision, 'block');
+
+    await withEnv({ MEMHUB_SELF_CHECK_EVERY_TURNS: '1' }, async () => {
+      await run('UserPromptSubmit', { prompt: '单轮也检查' });
+      assert.equal(JSON.parse(await run('Stop')).decision, 'block');
+    });
+
+    await withEnv({ MEMHUB_SELF_CHECK: '0', MEMHUB_SELF_CHECK_EVERY_TURNS: '1' }, async () => {
+      await run('UserPromptSubmit', { prompt: '关闭后不检查' });
       assert.deepEqual(JSON.parse(await run('Stop')), {});
     });
     await fsp.mkdir(globalDir, { recursive: true });
-    await fsp.writeFile(path.join(globalDir, 'config.json'), JSON.stringify({ selfCheck: { enabled: false } }));
+    await fsp.writeFile(path.join(globalDir, 'config.json'), JSON.stringify({ selfCheck: { enabled: false, everyTurns: 1 } }));
+    await run('UserPromptSubmit', { prompt: '配置关闭' });
     assert.deepEqual(JSON.parse(await run('Stop')), {});
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
 
-test('self-check: pi-desktop queues one self-check after a settled run and keeps it out of journals', async () => {
+test('self-check: pi-desktop throttles by interval, triggers near context limit, and keeps check out of journals', async () => {
   const { base, globalDir, repoDir } = await makeTempWorkspace();
   try {
-    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir }, async () => {
+    await withEnv({ MEMHUB_GLOBAL_DIR: globalDir, MEMHUB_SELF_CHECK_EVERY_TURNS: '2', MEMHUB_SELF_CHECK_CONTEXT_CHARS: '2500' }, async () => {
       const extPath = path.resolve(__dirname, '../adapters/pi-desktop/extension.js');
       delete require.cache[require.resolve(extPath)];
-      const { onProviderRequest, onAgentEnd, onAgentSettled, TOOLS } = require(extPath)._internals;
+      const { onProviderRequest, onToolResult, onAgentEnd, onAgentSettled, TOOLS } = require(extPath)._internals;
       const sent = [];
       const pi = { sendUserMessage: async text => { sent.push(text); } };
       const ctx = { cwd: repoDir, sessionId: 'pi-self' };
-      const turn = [
-        { role: 'user', content: '以后部署前都先跑 smoke 测试', timestamp: 1700000000000 },
-        { role: 'assistant', content: [{ type: 'text', text: '收到' }], timestamp: 1700000001000 },
+      const turn = (text, reply, ts) => [
+        { role: 'user', content: text, timestamp: ts },
+        { role: 'assistant', content: [{ type: 'text', text: reply }], timestamp: ts + 1000 },
       ];
 
-      await onAgentEnd({ messages: turn }, ctx);
+      await onAgentEnd({ messages: turn('第一轮普通提问', '普通回答', 1700000000000) }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 0);
+
+      const turn2 = turn('以后部署前都先跑 smoke 测试', '收到', 1700000002000);
+      await onAgentEnd({ messages: turn2 }, ctx);
       await onAgentSettled({ aborted: false }, ctx, pi);
       assert.equal(sent.length, 1);
       assert.ok(sent[0].startsWith(core.SELF_CHECK_MARKER));
@@ -946,24 +967,77 @@ test('self-check: pi-desktop queues one self-check after a settled run and keeps
       assert.equal(sent.length, 1);
 
       const checkTurn = [
-        { role: 'user', content: sent[0], timestamp: 1700000002000 },
-        { role: 'assistant', content: [{ type: 'text', text: '无需记录' }], timestamp: 1700000003000 },
+        { role: 'user', content: sent[0], timestamp: 1700000004000 },
+        { role: 'assistant', content: [{ type: 'text', text: '无需记录' }], timestamp: 1700000005000 },
       ];
-      const checkPayload = await onProviderRequest({ payload: { messages: [...turn, checkTurn[0]] } }, ctx);
+      const checkPayload = await onProviderRequest({ payload: { messages: [...turn2, checkTurn[0]] } }, ctx);
       assert.equal(checkPayload.messages.at(-1).content, sent[0]);
       await onAgentEnd({ messages: checkTurn }, ctx);
       await onAgentSettled({ aborted: false }, ctx, pi);
       assert.equal(sent.length, 1);
 
-      await onAgentEnd({ messages: [{ role: 'user', content: '下一个问题', timestamp: 1700000004000 }] }, ctx);
-      await onAgentSettled({ aborted: true }, ctx, pi);
+      await onToolResult({ toolName: TOOLS.propose, isError: false, input: { items: [] }, content: [] }, ctx);
+      await onAgentEnd({ messages: turn('主动写过记忆的一轮', '已记录', 1700000006000) }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
       assert.equal(sent.length, 1);
+
+      const bigTurn = turn('接近上下文上限的对话', '长回复'.repeat(1000), 1700000008000);
+      await onProviderRequest({ payload: { messages: bigTurn } }, ctx);
+      await onAgentEnd({ messages: bigTurn }, ctx);
+      await onAgentSettled({ aborted: false }, ctx, pi);
+      assert.equal(sent.length, 2);
+
+      await onAgentEnd({ messages: [{ role: 'user', content: '下一个问题', timestamp: 1700000010000 }] }, ctx);
+      await onAgentSettled({ aborted: true }, ctx, pi);
+      assert.equal(sent.length, 2);
 
       const stores = core.resolveStores({ globalDir, cwd: repoDir });
       const [session] = await core.listSessions(stores);
       const texts = (await core.loadSession(stores, { session_key: session.session_key })).messages.map(m => m.text);
-      assert.deepEqual(texts, ['以后部署前都先跑 smoke 测试', '收到', '下一个问题']);
+      assert.ok(!texts.some(t => t.startsWith(core.SELF_CHECK_MARKER)));
+      assert.ok(texts.includes('下一个问题'));
     });
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('propose & entities: returns similar candidates, supersedes by ref, and expands 1-hop entity links', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  try {
+    const stores = core.resolveStores({ homeDir, globalDir, cwd: repoDir });
+    const first = await core.proposeMemory(stores, {
+      items: [{ title: '生产镜像必须指定 linux/amd64', summary: 'Mac 编译部署到 relay.example.net', content: '使用 `--platform linux/amd64` 打包推送到 `relay.example.net`。', scope: 'global', type: 'skill', keywords: ['linux/amd64', 'relay.example.net'] }],
+    });
+    const firstId = first.committed[0].id;
+
+    const related = await core.proposeMemory(stores, {
+      items: [{ title: '服务运行在东京主机 `tokyo-edge` 上', summary: 'relay.example.net 的部署机器', content: '`claude-remote` 跑在 `tokyo-edge`（`relay.example.net`），通过 `Caddy` 反代。', scope: 'global', type: 'project', keywords: ['claude-remote', 'tokyo-edge'] }],
+    });
+    assert.equal(related.committed[0].similar[0].id, firstId);
+    assert.equal(related.committed[0].similar[0].ref, core.shortRef(firstId));
+
+    const caddyTip = await core.proposeMemory(stores, {
+      items: [{ title: 'Caddy 配置 redir 必须带路径匹配器', summary: '反代跳转踩坑', content: '在 `tokyo-edge` 上改 `Caddyfile` 时，`redir` 必须写 `redir * /to`。', scope: 'global', type: 'skill', keywords: ['Caddy', 'Caddyfile'] }],
+    });
+
+    const replaced = await core.proposeMemory(stores, {
+      items: [{ title: '生产镜像改用多架构 manifest 自动构建', summary: 'CI 已接管构建', content: '不再手动指定单平台参数，统一由 GitHub Actions 构建 `linux/amd64` 与 `arm64`。', scope: 'global', type: 'decision', supersedes: [core.shortRef(firstId)] }],
+    });
+    assert.equal(replaced.committed[0].action, 'supersede');
+    assert.deepEqual(replaced.committed[0].supersededIds, [firstId]);
+    const oldEntry = (await core.loadAllEntries(stores)).find(e => e.id === firstId);
+    assert.equal(oldEntry.status, 'deprecated');
+    assert.equal(oldEntry.supersededBy, replaced.committed[0].id);
+
+    const retrieved = await core.retrieveContext(stores, { query: 'claude-remote 为什么连不上？', rerank: null });
+    assert.ok(retrieved.ids.includes(related.committed[0].id));
+    assert.ok(retrieved.linkedIds.includes(caddyTip.committed[0].id));
+    assert.match(retrieved.block || '', /## 关联记忆/);
+    assert.match(retrieved.block || '', new RegExp(`\\[${core.shortRef(caddyTip.committed[0].id)}\\]`));
+    assert.match(retrieved.block || '', /tokyo-edge/);
+    assert.ok(fs.existsSync(path.join(globalDir, 'state/entities.json')));
+    assert.equal(fs.readFileSync(path.join(globalDir, 'state/.gitignore'), 'utf8'), '*\n!.gitignore\n');
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }

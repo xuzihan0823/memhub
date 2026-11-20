@@ -12,6 +12,7 @@ const CLAUDE_HOOK_EVENTS = [
   ['UserPromptSubmit', null],
   ['PostToolUse', 'Edit|Write|MultiEdit|NotebookEdit|Read'],
   ['PostToolUseFailure', null],
+  ['PreCompact', null],
   ['Stop', null],
 ];
 const CODEX_START = '# >>> memhub-mcp >>>';

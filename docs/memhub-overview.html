@@ -28,7 +28,7 @@
 <div class="rail-bottom"><b><span class="dot"></span>本地文件是记忆的载体</b><br>Node.js ≥ 18 · 零运行时依赖<br>页面离线可用 · 演示不写入数据</div>
 </aside>
 <main>
-<div class="topline"><span>PROJECT ATLAS &nbsp; / &nbsp; 项目结构与功能导览</span><span class="pill"><span class="dot"></span>PI 插件 0.3.4 · 每轮自检</span></div>
+<div class="topline"><span>PROJECT ATLAS &nbsp; / &nbsp; 项目结构与功能导览</span><span class="pill"><span class="dot"></span>PI 插件 0.3.5 · 每轮自检</span></div>
 <header class="hero">
 <div><p class="eyebrow">One memory, across agents</p><h1>换一个 Agent，<br>也能接上<em>之前的事。</em></h1><p class="lead">MemHub 把长期知识、任务进度和聊天记录保存在本地，让不同 AI 助手通过同一套接口读取。宿主负责接入，核心负责组织记忆；自动续聊的完成度取决于各宿主的接入进度。</p></div>
 <div class="hero-art" aria-hidden="true"><div class="orbit"></div><div class="orbit o2"></div><div class="orbit o3"></div><div class="art-core">M</div><i class="art-dot"></i><i class="art-dot d2"></i></div>
@@ -105,7 +105,7 @@
 <section id="support">
 <div class="section-head"><div><p class="section-id">05 / CURRENT BOUNDARIES</p><h2>现在能做到哪里？</h2><p class="section-desc">代码支持、接入方式与真实宿主验收，是三件不同的事。</p></div></div>
 <div class="panel table-wrap"><table class="support"><thead><tr><th scope="col">入口</th><th scope="col">长期记忆 / 任务交接</th><th scope="col">完整聊天的自动采集与续聊</th><th scope="col">当前边界</th></tr></thead><tbody>
-<tr><td>PI-Desktop</td><td><span class="badge">插件自动注入 + 主动工具</span></td><td><span class="badge">0.3.4 已有事件实现</span><small>请求前保存、轮次结束落盘、空闲后自检、新会话恢复</small></td><td>真实桌面双窗口验收待完成<small>已具备扩展事件与宿主加载器测试；未核验当前安装版本</small></td></tr>
+<tr><td>PI-Desktop</td><td><span class="badge">插件自动注入 + 主动工具</span></td><td><span class="badge">0.3.5 已有事件实现</span><small>请求前保存、轮次结束落盘、空闲后自检、新会话恢复</small></td><td>真实桌面双窗口验收待完成<small>已具备扩展事件与宿主加载器测试；未核验当前安装版本</small></td></tr>
 <tr><td>Claude Code</td><td><span class="badge">Hooks + MCP</span><small>启动、提问、工具事件、Stop 自检</small></td><td><span class="badge amber">完整 transcript 接入待完成</span></td><td>长期记忆 Hook 已有代码<small>Stop 自检只补长期记忆，不等于统一会话完整采集</small></td></tr>
 <tr><td>Codex / Cursor / Pi CLI</td><td><span class="badge blue">MCP + Skill</span><small>由 Agent 主动调用记忆及会话工具</small></td><td><span class="badge amber">自动流程未完成</span></td><td>当前不提供已验收的原生自动 Hook<small>Codex CLI 与桌面端需分别验证</small></td></tr>
 <tr><td>其他宿主 / DSH</td><td>共享文件作为兜底<small>也可按实际 MCP 能力接入</small></td><td><span class="badge amber">需按宿主核实</span></td><td>不由文件兼容推断自动续聊已支持</td></tr>
@@ -114,19 +114,19 @@
 <div class="boundary"><div class="panel boundary-card"><h3>模型只做可选辅助</h3><p><b>rerank</b>：从候选标头挑相关记忆，失败退回关键词。<b>summary</b>：压缩会话供恢复，自动保存摘要，不写长期记忆。记忆提炼由当前 Agent 每轮自检完成，不再单独调用复盘模型。未完整配置 URL 和模型的通道不启用。</p></div><div class="panel boundary-card warm"><h3>本地规则负责确定行为</h3><p>目录归属、过期判断、状态过滤、去重和确认后删除由代码执行。没有让后台模型持续遍历旧记忆并自动淘汰的机制；冷记忆超过 90 天未访问时，检查工具仅建议归档。已知密钥格式会过滤，不能据此视为完整脱敏。</p></div></div>
 <p class="note">基础存储在本地；开启模型通道后，相应的提问、候选标头或过滤后的对话会发送到所配置的端点。本页只展示代码结构，不读取本机密钥、聊天或服务状态。</p>
 </section>
-<footer><p>依据当前仓库代码核对（0.3.4 每轮自检版本）。参考：<a href="../README.md">README</a> · <a href="cross-agent-session-memory-design.md">会话层设计</a> · <a href="session-memory-implementation.md">实施与验收记录</a>。历史文档部分仍标注旧版本，本页以当前代码为准。</p><span class="mono">MEMHUB / ARCHITECTURE NOTES</span></footer>
+<footer><p>依据当前仓库代码核对（0.3.5 每轮自检版本）。参考：<a href="../README.md">README</a> · <a href="cross-agent-session-memory-design.md">会话层设计</a> · <a href="session-memory-implementation.md">实施与验收记录</a>。历史文档部分仍标注旧版本，本页以当前代码为准。</p><span class="mono">MEMHUB / ARCHITECTURE NOTES</span></footer>
 </main>
 <script>
 'use strict';
 const moduleDetails={
 store:{title:'记忆组织与写入',desc:'把内容放到正确的库里，并维护它的状态；核心不依赖某一个宿主。',points:['全局知识与项目知识分别保存','同标题可替代旧结论；同任务键更新交接','写入默认直接生效；Inbox 仅在显式 requireReview 时使用'],source:'packages/core/src/store.js'},
-pi:{title:'PI-Desktop 插件',desc:'通过宿主事件，在聊天前后自动调用核心；插件内置核心，不要求启动 daemon。',points:['启动注入身份、目录、交接与上一会话','提问、目录访问和工具报错可触发相关记忆检索','每轮空闲后追加一次自检消息；真实桌面验收待完成'],source:'adapters/pi-desktop/extension-0.3.4.js\nadapters/pi-desktop/main.js'},
+pi:{title:'PI-Desktop 插件',desc:'通过宿主事件，在聊天前后自动调用核心；插件内置核心，不要求启动 daemon。',points:['启动注入身份、目录、交接与上一会话','提问、目录访问和工具报错可触发相关记忆检索','每轮空闲后追加一次自检消息；真实桌面验收待完成'],source:'adapters/pi-desktop/extension-0.3.5.js\nadapters/pi-desktop/main.js'},
 claude:{title:'Claude Code 接入',desc:'CLI 安装五类 Hooks，结合 MCP 提供长期记忆和任务交接。',points:['会话开始、提问与工具事件补充上下文','Stop 时让同一 Agent 自检一次，stop_hook_active 防止循环','完整聊天标准化采集与 PI 双向自动续聊仍待接入'],source:'packages/cli/src/setup.js\npackages/cli/src/hook.js'},
 mcp:{title:'MCP 与 Skill',desc:'把统一能力暴露成工具，供支持 MCP 的宿主按需调用。',points:['5 个基础记忆工具，含 boot、search、load、propose、forget','另有 5 个会话工具，保存与恢复不混入长期接口','Codex、Cursor、Pi CLI 当前依赖 Agent 主动调用，不能视为已有自动采集'],source:'packages/mcp-server/src/server.js\nadapters/cursor-codex/SKILL.md'},
 web:{title:'命令与管理界面',desc:'CLI 用来安装、诊断和操作记忆；Web 用来可视化管理。',points:['memhub serve 启动本地 daemon 与 Web 控制台','Web 可编辑 SOUL、审批 Inbox、浏览记忆与关系图谱','CLI 还提供会话列表、分段读取、摘要、诊断与超期清理'],source:'packages/cli/bin/memhub.js\npackages/daemon/src/server.js\npackages/web-ui/index.html'},
 retrieve:{title:'检索与上下文注入',desc:'先给 Agent 相关标题和摘要，需要细节时再加载全文。',points:['默认用本地关键词与目录路径匹配，不要求向量数据库','可选 rerank 模型从候选标头里筛选，失败退回关键词','PI 同会话避免重复注入，工具事件每轮限制补充次数'],source:'packages/core/src/search.js\npackages/core/src/retrieve.js\npackages/core/src/rerank.js'},
 session:{title:'会话保存与恢复',desc:'保存“当时说了什么”，与长期知识的组织、搜索和审批独立。',points:['按工作区、宿主和会话 ID 生成独立键','稳定消息标识去重，按序号读原话；来源选定后固定','默认自动选择同工作区最近、未过期的其他主会话'],source:'packages/core/src/sessions.js\npackages/core/src/session-api.js'},
-review:{title:'每轮结束自检',desc:'不另调复盘模型：每轮结束后让同一个 Agent 回看对话，补记漏掉的结论。',points:['Claude Code 用 Stop 拦截在同一轮内自检；PI 在空闲后追加一条自检消息','有依据的结论直接写入长期记忆或交接单，没有就回复“无需记录”','自检轮不再触发自检，也不写入会话记录；可用 selfCheck.enabled=false 关闭'],source:'packages/core/src/store.js\npackages/cli/src/hook.js\nadapters/pi-desktop/extension-0.3.4.js'},
+review:{title:'每轮结束自检',desc:'不另调复盘模型：每轮结束后让同一个 Agent 回看对话，补记漏掉的结论。',points:['Claude Code 用 Stop 拦截在同一轮内自检；PI 在空闲后追加一条自检消息','有依据的结论直接写入长期记忆或交接单，没有就回复“无需记录”','自检轮不再触发自检，也不写入会话记录；可用 selfCheck.enabled=false 关闭'],source:'packages/core/src/store.js\npackages/cli/src/hook.js\nadapters/pi-desktop/extension-0.3.5.js'},
 life:{title:'生命周期管理',desc:'“遗忘”主要通过状态过滤与归档实现，物理删除单独确认。',points:['交接默认超过 14 天未更新过期，下次启动归档','聊天默认超过 90 天未更新，不参与普通自动选源','长期知识可作废或归档，无统一自动到期；没有定时删聊天'],source:'packages/core/src/markdown.js\npackages/core/src/store.js\npackages/core/src/sessions.js'},
 safe:{title:'安全文件读写',desc:'多个进程可能同时读写同一套文件，公共文件层负责边界与一致性。',points:['检查相对路径和符号链接，阻止越出记忆根目录','通过事务锁和原子替换减少并发写入冲突','过滤已知密钥格式；对话与工具输出仍需按用途控制'],source:'packages/core/src/fs-safe.js\npackages/core/src/store.js'},
 global:{title:'全局记忆库',desc:'保存换到其他项目后仍然成立的知识，默认位于用户目录。',points:['SOUL 定义身份与沟通方式','user、skills、decisions 等目录保存长期条目','非项目交接和聊天也可保存在这里，但按实际目录隔离'],source:'~/.memory/\n由 core.resolveStores() 定位'},

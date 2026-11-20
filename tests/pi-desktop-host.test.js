@@ -16,12 +16,16 @@ test('PI host loader: versioned entry replaces cached factory and saves/restores
   const cwd = path.join(root, 'repo');
   await fs.mkdir(path.join(cwd, '.git'), { recursive: true });
   const previousGlobal = process.env.MEMHUB_GLOBAL_DIR;
+  const previousEveryTurns = process.env.MEMHUB_SELF_CHECK_EVERY_TURNS;
   process.env.MEMHUB_GLOBAL_DIR = path.join(root, 'memory');
+  process.env.MEMHUB_SELF_CHECK_EVERY_TURNS = '1';
   const runners = [];
   t.after(async () => {
     await Promise.all(runners.map(r => r.dispose()));
     if (previousGlobal === undefined) delete process.env.MEMHUB_GLOBAL_DIR;
     else process.env.MEMHUB_GLOBAL_DIR = previousGlobal;
+    if (previousEveryTurns === undefined) delete process.env.MEMHUB_SELF_CHECK_EVERY_TURNS;
+    else process.env.MEMHUB_SELF_CHECK_EVERY_TURNS = previousEveryTurns;
     await fs.rm(root, { recursive: true, force: true });
   });
   await installForAgent('pi-desktop', { homeDir: home });

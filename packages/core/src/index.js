@@ -10,4 +10,5 @@ module.exports = {
   ...require('./sessions'),
   ...require('./session-api'),
   ...require('./usage'),
+  ...require('./entities'),
 };

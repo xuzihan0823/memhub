@@ -31,7 +31,7 @@
 3. **工具调用之后**：命令或工具失败时用报错文本检索；首次读写某个目录时按记忆的 `paths` 匹配。每轮最多补充 3 次。
 4. **Agent 主动拉取**：任何时候都可以调用 `memory_search` / `memory_load(id)`。
 
-检索默认是本地关键词匹配（中文二元切分 + 英文分词，标题、`keywords`、`triggers` 为强匹配字段）。写入时把标题写成结论、在 `triggers` 里写会遇到它的场景和同义词，召回效果会好很多。
+检索默认是本地关键词匹配（中文二元切分 + 英文分词，标题、`keywords`、`triggers` 为强匹配字段），并在命中结果后基于 `state/entities.json` 的共现实体做一跳关联延伸（不依赖向量库）。写入时把标题写成结论、在 `triggers` 里写会遇到它的场景和同义词，召回效果会好很多。
 
 可选的小模型精排：设置以下环境变量后，自动注入前会先让小模型从候选标头里挑出真正相关的条目；超时或出错时自动退回关键词结果。
 
@@ -44,21 +44,23 @@ export MEMHUB_RERANK_TIMEOUT_MS=1500                            # 可选
 
 注意：开启后，候选记忆的标题与摘要、当前提问会发送到该接口。
 
-## 每轮结束自检
+## 定期自检与整理
 
-Agent 经常忘了主动写记忆。MemHub 不额外调用复盘模型，而是在每轮任务结束后，让**同一个 Agent** 再做一次简短自检：回看自上次自检以来的对话，按写入规则把有依据、以后还会用到的结论直接写入长期记忆，把任务进度写入交接单；没有可记的内容时只回复“无需记录”。自检这一轮不会再触发新的自检。
+Agent 经常忘了主动写记忆。MemHub 不额外调用复盘模型，而是由**同一个 Agent** 定期回看自上次自检以来的对话，按写入规则沉淀可复用结论、补绝对日期（`YYYY-MM-DD`），并在结论被推翻时用同标题覆盖、`supersedes` 替代不同标题的旧条目或 `forget(deprecate)` 废弃旧条目；没有需要保存或修改的内容时只回复“无需记录”。自检这一轮不会再触发新的自检。
 
-- **Claude Code**：`Stop` Hook 返回 `decision: "block"` 和自检说明，Agent 在同一轮里完成自检后再结束；`stop_hook_active` 防止循环。本轮改过文件但未更新交接单时，自检说明会附带提醒。
-- **PI-Desktop**：插件在 `agent_settled`（本轮完全结束、会话空闲）时用 `sendUserMessage` 追加一条自检消息，作为下一轮执行；被中断的轮次不追加。自检消息及其回复不写入会话记录，也不参与记忆检索。
+为避免每轮都多跑一次模型调用，默认**每 5 轮**或**接近上下文压缩**时才触发一次自检（可在 `config.json` 的 `selfCheck.everyTurns` / `selfCheck.contextChars`，或环境变量 `MEMHUB_SELF_CHECK_EVERY_TURNS` / `MEMHUB_SELF_CHECK_CONTEXT_CHARS` 调整；设为 `1` 即每轮自检）：
+
+- **Claude Code**：`Stop` Hook 在达到步数间隔、`PreCompact` 压缩触发，或本轮改过文件但未更新交接单时返回 `decision: "block"` 触发自检；本轮已经主动调用过 `propose` 会重置计数，`stop_hook_active` 防止循环。
+- **PI-Desktop**：插件在 `agent_settled`（本轮完全结束、会话空闲）且达到步数间隔或对话字符数接近阈值时，用 `sendUserMessage` 追加一条自检消息；主动调用过 `propose` 会重置计数，被中断的轮次不追加。自检消息及其回复不写入会话记录，也不参与记忆检索。
 - **Codex / Cursor / Pi CLI**：当前没有接入 Hook，仍依赖 Agent 主动调用 `memory_propose`。
 
-自检会额外消耗一次模型调用。默认开启；在全局 `config.json` 中设置 `"selfCheck": { "enabled": false }`，或设置 `MEMHUB_SELF_CHECK=0` 即可关闭。
+默认开启；在全局 `config.json` 中设置 `"selfCheck": { "enabled": false }`，或设置 `MEMHUB_SELF_CHECK=0` 即可关闭。
 
-## 会话保存与续聊（PI 插件 0.3.4）
+## 会话保存与续聊（PI 插件 0.3.5）
 
 PI-Desktop 在请求前保存可取得的消息，在 `agent_end` 等待本轮基础落盘，`session_shutdown` 补存；保存不依赖任何模型。新会话启动时恢复同一工作区最近的其他主会话，注入独立的 `<memory-session>` 块，标明来源 Agent、时间、序号和摘要覆盖范围，并将来源固定到本次会话。后台摘要未完成或失败时仍能读取已保存原话。此自动流程已通过扩展事件测试，真实桌面端双窗口验收仍待执行。
 
-插件实现入口与 bundled core 使用版本化路径（当前 `extension-0.3.4.js`、`core/0.3.4/src/`）：PI 0.22.0 会按入口路径缓存旧模块，同路径重装后仍会运行旧代码。测试包含直接使用 PI 0.22.0 加载器的缓存复现、保存/恢复，以及 `agent_settled` 后追加自检消息；完整桌面 UI 验收仍待安装新版后执行。
+插件实现入口与 bundled core 使用版本化路径（当前 `extension-0.3.5.js`、`core/0.3.5/src/`）：PI 0.22.0 会按入口路径缓存旧模块，同路径重装后仍会运行旧代码。测试包含直接使用 PI 0.22.0 加载器的缓存复现、保存/恢复，以及 `agent_settled` 后追加自检消息；完整桌面 UI 验收仍待安装新版后执行。
 
 会话日志不进入长期目录、搜索或 Inbox；在 A 中讨论 B 的对话仍保存到 A。B 的当前阶段继续由 Agent 通过 `cwd` 指向 B 的交接工具维护。既有聊天不会自动批量导入。
 

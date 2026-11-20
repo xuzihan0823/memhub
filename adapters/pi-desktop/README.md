@@ -1,6 +1,6 @@
-# MemHub Universal Memory 0.3.4
+# MemHub Universal Memory 0.3.5
 
-在同一台机器上共享全局长期记忆、项目交接和独立的会话记录。插件包必须包含 `core/0.3.4/src/`；仓库开发时回退到 `../../packages/core/src/`。扩展实现入口是 `extension-0.3.4.js`，`extension.js` 仅供仓库内兼容引用。
+在同一台机器上共享全局长期记忆、项目交接和独立的会话记录。插件包必须包含 `core/0.3.5/src/`；仓库开发时回退到 `../../packages/core/src/`。扩展实现入口是 `extension-0.3.5.js`，`extension.js` 仅供仓库内兼容引用。
 
 ## 会话保存与续聊
 

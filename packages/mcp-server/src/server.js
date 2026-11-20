@@ -23,6 +23,7 @@ const PROPOSE_ITEM_SCHEMA = {
     task: { type: 'string', description: 'Handoff only: use project-status for the project current stage, or a distinct fixed key per concrete task. Same key updates in place.' },
     status: { type: 'string', enum: ['active', 'blocked', 'done', 'abandoned'], description: 'Handoff only. done requires every acceptance item checked with evidence.' },
     ttl_days: { type: 'integer', minimum: 1, description: 'Handoff only: expire after N days without update (default 14).' },
+    supersedes: { type: 'array', items: { type: 'string' }, description: 'Long-term only: IDs or 6-char short refs of different-title entries that this new entry replaces and deprecates.' },
   },
   required: ['title', 'content'],
 };

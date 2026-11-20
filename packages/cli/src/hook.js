@@ -18,7 +18,7 @@ function cacheFileFor({ cacheDir, cwd, sessionId }) {
 }
 
 function readState(file) {
-  const empty = { ids: [], dirs: [], turn: 0, toolInjections: 0, wrote: false, handoffTouched: false };
+  const empty = { ids: [], dirs: [], turn: 0, turnsSinceSelfCheck: 0, compactPending: false, toolInjections: 0, wrote: false, handoffTouched: false };
   if (!file || !fs.existsSync(file)) return empty;
   try {
     return { ...empty, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
@@ -97,9 +97,15 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
   const file = cacheFileFor({ cacheDir: cacheDir || path.join(homeDir || os.homedir(), '.cache', 'memhub', 'sessions'), cwd, sessionId });
   const state = readState(file);
 
+  if (event === 'PreCompact') {
+    state.compactPending = true;
+    writeState(file, state);
+    return NO_OUTPUT;
+  }
+
   if (event === 'SessionStart') {
     const source = String(payload.source || 'startup');
-    const fresh = { ids: [], dirs: [], turn: 0, toolInjections: 0, wrote: false, handoffTouched: false };
+    const fresh = { ids: [], dirs: [], turn: 0, turnsSinceSelfCheck: 0, compactPending: source === 'compact', toolInjections: 0, wrote: false, handoffTouched: false };
     await core.scaffoldGlobalStore(stores.globalDir);
     const boot = await core.bootContext(stores);
     writeState(file, source === 'resume' ? { ...state, toolInjections: 0 } : fresh);
@@ -109,6 +115,7 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
   if (event === 'UserPromptSubmit') {
     const prompt = String(payload.prompt || payload.user_prompt || '').trim();
     state.turn += 1;
+    state.turnsSinceSelfCheck += 1;
     state.toolInjections = 0;
     state.wrote = false;
     state.handoffTouched = false;
@@ -131,7 +138,10 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     const toolName = String(payload.tool_name || '');
     const toolInput = payload.tool_input || {};
     const failed = event === 'PostToolUseFailure';
-    if (/memory_propose$|_propose$/.test(toolName) && JSON.stringify(toolInput).includes('handoff')) state.handoffTouched = true;
+    if (/memory_propose$|_propose$/.test(toolName) && !failed) {
+      state.turnsSinceSelfCheck = 0;
+      if (JSON.stringify(toolInput).includes('handoff')) state.handoffTouched = true;
+    }
     if (EDIT_TOOLS.has(toolName) && !failed) state.wrote = true;
 
     const absFile = toolFilePath(toolInput, cwd);
@@ -167,8 +177,10 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     const pending = await core.listInboxBatches(stores);
     if (pending.length) notes.push(`MemHub 提示：当前有 ${pending.length} 条待审批记忆提案，可运行 memhub ui 处理。`);
     const handoffHint = state.wrote && !state.handoffTouched;
-    writeState(file, { ...state, wrote: false });
-    if (!payload.stop_hook_active && core.selfCheckEnabled(stores)) {
+    const cfg = core.selfCheckConfig(stores);
+    const due = !payload.stop_hook_active && cfg.enabled && (handoffHint || state.compactPending || state.turnsSinceSelfCheck >= cfg.everyTurns);
+    writeState(file, { ...state, wrote: false, ...(due ? { turnsSinceSelfCheck: 0, compactPending: false } : {}) });
+    if (due) {
       const hint = handoffHint ? '\n本轮修改了文件但还没有更新任务交接单；任务未完成时请先提交 scope="handoff" 交接单。' : '';
       return JSON.stringify({ decision: 'block', reason: `${core.selfCheckPrompt()}${hint}`, ...(notes.length ? { systemMessage: notes.join('\n') } : {}) });
     }

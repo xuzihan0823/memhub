@@ -61,7 +61,6 @@ MemHub 不额外调用复盘模型，也不在聊天界面额外插入自检气�
 PI-Desktop 在请求前保存可取得的消息，在 `agent_end` 等待本轮基础落盘，`session_shutdown` 补存；保存不依赖任何模型。新会话启动时恢复同一工作区最近的其他主会话，注入独立的 `<memory-session>` 块，标明来源 Agent、时间、序号和摘要覆盖范围，并将来源固定到本次会话。后台摘要未完成或失败时仍能读取已保存原话。此自动流程已通过扩展事件测试，真实桌面端双窗口验收仍待执行。
 插件实现入口与 bundled core 使用版本化路径（当前 `extension-0.3.6.js`、`core/0.3.6/src/`）：PI 0.22.0 会按入口路径缓存旧模块，同路径重装后仍会运行旧代码。测试包含直接使用 PI 0.22.0 加载器的缓存复现、保存/恢复，以及隐形 `<memory-nudge>` 注入；完整桌面 UI 验收仍待安装新版后执行。
 
-插件实现入口与 bundled core 使用版本化路径（当前 `extension-0.3.6.js`、`core/0.3.6/src/`）：PI 0.22.0 会按入口路径缓存旧模块，同路径重装后仍会运行旧代码。测试包含直接使用 PI 0.22.0 加载器的缓存复现、保存/恢复，以及隐形 `<memory-nudge>` 注入；完整桌面 UI 验收仍待安装新版后执行。
 会话日志不进入长期目录、搜索或 Inbox；在 A 中讨论 B 的对话仍保存到 A。B 的当前阶段继续由 Agent 通过 `cwd` 指向 B 的交接工具维护。既有聊天不会自动批量导入。
 
 基础保存默认开启。可在全局 `config.json` 中设置 `"sessions": { "enabled": false }`，或 `MEMHUB_SESSIONS_ENABLED=0` 关闭自动采集与恢复。摘要使用单独的 `summary` 配置段（字段：`enabled`、`url`、`model`、可选 `apiKey`、`timeoutMs`、`reasoningEffort`），也支持 `MEMHUB_SUMMARY_*` 环境变量；未配置完整 URL 和模型时不发送摘要请求。开启后，会将已过滤的会话文字发送到明确配置的端点，结果自动保存到会话记录。`summary.enabled=false` / `MEMHUB_SUMMARY_ENABLED=0` 只关闭模型摘要。

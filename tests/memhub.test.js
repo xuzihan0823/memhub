@@ -12,7 +12,7 @@ const core = require('../packages/core/src');
 const { startDaemon } = require('../packages/daemon/src/server');
 const { processRpcMessage } = require('../packages/mcp-server/src/server');
 const { detectAgents, installForAgent, uninstallFromHome } = require('../packages/cli/src/setup');
-const { runHook } = require('../packages/cli/src/hook');
+const { runHook, lastAssistantText } = require('../packages/cli/src/hook');
 
 function isoDaysAgo(days) {
   const d = new Date();
@@ -203,12 +203,22 @@ test('cli setup: sandboxed agent detection, backup, install, and uninstall', asy
 
     const codexToml = fs.readFileSync(path.join(homeDir, '.codex', 'config.toml'), 'utf8');
     assert.match(codexToml, /\[mcp_servers\.memhub\]/);
+    const codexHooksPath = path.join(homeDir, '.codex', 'hooks.json');
+    const codexHooks = JSON.parse(fs.readFileSync(codexHooksPath, 'utf8'));
+    assert.deepEqual(Object.keys(codexHooks.hooks), ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PreCompact', 'Stop']);
+    assert.match(codexHooks.hooks.UserPromptSubmit[0].hooks[0].command, /hook codex --event UserPromptSubmit/);
+    assert.equal((codexToml.match(/trusted_hash = "sha256:[0-9a-f]{64}"/g) || []).length, 5);
+    assert.ok(codexToml.includes(`[hooks.state.${JSON.stringify(`${codexHooksPath}:user_prompt_submit:0:0`)}]`));
+    await installForAgent('codex', { homeDir });
+    assert.equal(JSON.parse(fs.readFileSync(codexHooksPath, 'utf8')).hooks.Stop.length, 1);
+    assert.equal((fs.readFileSync(path.join(homeDir, '.codex', 'config.toml'), 'utf8').match(/trusted_hash/g) || []).length, 5);
 
     await uninstallFromHome(homeDir);
     const restoredClaude = JSON.parse(fs.readFileSync(path.join(homeDir, '.claude', 'settings.json'), 'utf8'));
     assert.equal(restoredClaude.hooks, undefined);
     const restoredCodex = fs.readFileSync(path.join(homeDir, '.codex', 'config.toml'), 'utf8');
     assert.equal(restoredCodex, 'model = "gpt-5"\n');
+    assert.equal(fs.existsSync(codexHooksPath), false);
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
@@ -696,6 +706,27 @@ test('hook: session boot, compact reset, tool-failure retrieval, and Stop handof
     assert.doesNotMatch(JSON.parse(await run('Stop', { stop_hook_active: false })).reason || '', /还没有更新任务交接单/);
   } finally {
     if (prevRerank !== undefined) process.env.MEMHUB_RERANK_URL = prevRerank;
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('hook: Codex apply_patch marks edits and rollout transcripts provide previous context', async () => {
+  const { base, homeDir, globalDir, repoDir } = await makeTempWorkspace();
+  const cacheDir = path.join(base, 'cache');
+  const run = (event, payload) => runHook({ event, payload: { cwd: repoDir, session_id: 'cx1', ...payload }, homeDir, globalDir, cacheDir, fetchImpl: null });
+  try {
+    const rollout = path.join(base, 'rollout.jsonl');
+    await fsp.writeFile(rollout, `${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '上一轮 Codex 回答' }] } })}\n`);
+    assert.equal(lastAssistantText(rollout), '上一轮 Codex 回答');
+
+    await run('UserPromptSubmit', { prompt: '改一下代码' });
+    const patch = '*** Begin Patch\n*** Update File: src/a.js\n@@\n-a\n+b\n*** Add File: lib/new.js\n+x\n*** End Patch\n';
+    await run('PostToolUse', { tool_name: 'apply_patch', tool_input: { command: patch } });
+    const stop = JSON.parse(await run('Stop', { stop_hook_active: false }));
+    assert.equal(stop.decision, 'block');
+    const state = JSON.parse(fs.readFileSync(fs.readdirSync(cacheDir).map(f => path.join(cacheDir, f))[0], 'utf8'));
+    assert.deepEqual(state.dirs, ['src', 'lib']);
+  } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
 });

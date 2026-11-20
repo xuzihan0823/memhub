@@ -52,7 +52,8 @@ MemHub 不额外调用复盘模型，也不在聊天界面额外插入自检气�
 
 - **Claude Code**：`UserPromptSubmit` 在达到步数间隔或 `PreCompact` 压缩后注入 `<memory-nudge>`；`Stop` 仅在本轮改过文件却未更新交接单时提醒，普通聊天不再拦截。
 - **PI-Desktop**：插件在 `before_provider_request` 中达到步数间隔或 `session_compact` 后注入 `<memory-nudge>`；主动调用 `propose` / `forget` 会重置计数，`<memory-nudge>` 不会写入会话记录。
-- **Codex / Cursor / Pi CLI**：当前没有接入 Hook，仍依赖 Agent 主动调用 `memory_propose`。
+- **Codex**（CLI 0.162+，需开启 `hooks` 功能）：与 Claude Code 同一套 Hook 逻辑，`UserPromptSubmit` 按间隔或 `PreCompact` 后注入 `<memory-nudge>`；`apply_patch` 改过文件却未更新交接单时由 `Stop` 提醒。
+- **Cursor / Pi CLI**：当前没有接入 Hook，仍依赖 Agent 主动调用 `memory_propose`。
 
 默认开启；在全局 `config.json` 中设置 `"selfCheck": { "enabled": false }`，或设置 `MEMHUB_SELF_CHECK=0` 即可关闭。
 
@@ -81,7 +82,8 @@ PI 工具为 `session_capture` / `session_restore` / `session_list` / `session_l
 
 - **PI-Desktop 插件**（`adapters/pi-desktop/`）：进程内读写记忆库，不需要守护进程；提供启动目录、每轮与工具错误检索、会话保存与恢复，以及 4 个长期记忆工具和 5 个会话工具。
 - **Claude Code**：`SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PostToolUseFailure` / `Stop` 五个 Hook + MCP。`Stop` Hook 负责每轮结束自检（见上文）。旧版本注册过的 `SessionEnd` Hook 不再需要，重新运行 `memhub init --agents claude` 会自动清理。
-- **Codex / Cursor / Pi CLI**：MCP（`memhub mcp`）+ `adapters/cursor-codex/SKILL.md` 规则。没有 Hook，只能靠 Agent 主动调用。安装 Codex 时会遵循 `CODEX_HOME` 环境变量。
+- **Codex**：`$CODEX_HOME/hooks.json` 中的 `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PreCompact` / `Stop` 五个 Hook + MCP + `adapters/cursor-codex/SKILL.md` 规则。安装时按 Codex 的 Hook 信任算法在 `config.toml` 的标记块内写入 `hooks.state.*.trusted_hash`，无需再到 `/hooks` 手动审批；改动 `hooks.json` 里 MemHub 的条目后重新运行 `memhub init --agents codex` 即可重新信任。安装遵循 `CODEX_HOME` 环境变量。
+- **Cursor / Pi CLI**：MCP（`memhub mcp`）+ `adapters/cursor-codex/SKILL.md` 规则。没有 Hook，只能靠 Agent 主动调用。
 - **纯文件兜底**：自描述的 `MEMORY.md` 与自动维护的 `index.md`。
 
 MCP 提供原有的 `memory_boot` / `memory_search` / `memory_load` / `memory_propose` / `memory_forget` 和 5 个独立的 `memory_session_*` 工具。`memory_boot` 传 `source_session_id` 与 `origin_agent` 时复用统一会话恢复。`memory_propose` 默认直接写入（同标题替代旧结论，同 `task` 更新交接单），传 `requireReview: true` 时进入 Inbox 待审批；物理删除必须传 `confirm: true`。

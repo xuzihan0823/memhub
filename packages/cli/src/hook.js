@@ -8,7 +8,7 @@ const core = require('../../core/src');
 
 const MAX_SEEN = 200;
 const MAX_TOOL_INJECTIONS_PER_TURN = 3;
-const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'apply_patch']);
 const NO_OUTPUT = '{}';
 
 function cacheFileFor({ cacheDir, cwd, sessionId }) {
@@ -53,11 +53,12 @@ function lastAssistantText(transcriptPath, maxBytes = 64 * 1024) {
         if (!line.includes('"assistant"')) continue;
         try {
           const rec = JSON.parse(line);
-          const content = rec?.message?.content;
+          const message = rec?.message || (rec?.type === 'response_item' ? rec.payload : null);
+          const content = message?.content;
           const text = typeof content === 'string'
             ? content
-            : Array.isArray(content) ? content.filter(p => p?.type === 'text').map(p => p.text).join('\n') : '';
-          if (rec?.message?.role === 'assistant' && text.trim()) return text.trim();
+            : Array.isArray(content) ? content.filter(p => p?.type === 'text' || p?.type === 'output_text').map(p => p.text).join('\n') : '';
+          if (message?.role === 'assistant' && text.trim()) return text.trim();
         } catch {
           // partial line
         }
@@ -71,11 +72,12 @@ function lastAssistantText(transcriptPath, maxBytes = 64 * 1024) {
   return '';
 }
 
-function toolFilePath(toolInput, cwd) {
-  const raw = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path;
-  if (typeof raw !== 'string' || !raw) return null;
-  const abs = path.resolve(cwd, raw);
-  return abs;
+function toolFilePaths(toolInput, cwd) {
+  const patch = typeof toolInput?.command === 'string' && toolInput.command.includes('*** Begin Patch') ? toolInput.command : '';
+  const raws = patch
+    ? [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/gm)].map(m => (m[1] || m[2]).trim())
+    : [toolInput?.file_path || toolInput?.notebook_path || toolInput?.path];
+  return raws.filter(raw => typeof raw === 'string' && raw).map(raw => path.resolve(cwd, raw));
 }
 
 function relativeToProject(absPath, stores) {
@@ -152,11 +154,10 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
     }
     if (EDIT_TOOLS.has(toolName) && !failed) state.wrote = true;
 
-    const absFile = toolFilePath(toolInput, cwd);
-    const relFile = relativeToProject(absFile, stores);
-    const dir = relFile ? path.posix.dirname(relFile) : null;
-    const newDir = dir !== null && !state.dirs.includes(dir);
-    if (newDir) state.dirs.push(dir);
+    const relFiles = toolFilePaths(toolInput, cwd).map(abs => relativeToProject(abs, stores)).filter(Boolean);
+    const newDirs = [...new Set(relFiles.map(rel => path.posix.dirname(rel)))].filter(dir => !state.dirs.includes(dir));
+    state.dirs.push(...newDirs);
+    const newDir = newDirs.length > 0;
 
     if ((!failed && !newDir) || state.toolInjections >= MAX_TOOL_INJECTIONS_PER_TURN) {
       writeState(file, state);
@@ -167,7 +168,7 @@ async function runHook({ event, payload = {}, flags = {}, homeDir, globalDir, ca
       : '';
     const result = await core.retrieveContext(stores, {
       query,
-      paths: relFile ? [relFile] : [],
+      paths: relFiles,
       exclude: state.ids,
       limit: 3,
       fetchImpl,

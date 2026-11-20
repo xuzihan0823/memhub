@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -15,6 +16,14 @@ const CLAUDE_HOOK_EVENTS = [
   ['PreCompact', null],
   ['Stop', null],
 ];
+const CODEX_HOOK_EVENTS = [
+  ['SessionStart', null],
+  ['UserPromptSubmit', null],
+  ['PostToolUse', 'apply_patch|_propose$|_forget$'],
+  ['PreCompact', null],
+  ['Stop', null],
+];
+const CODEX_HOOK_TIMEOUT = 10;
 const CODEX_START = '# >>> memhub-mcp >>>';
 const CODEX_END = '# <<< memhub-mcp <<<';
 
@@ -112,21 +121,49 @@ function isMemhubHookEntry(entry) {
   return text.includes(JSON.stringify(MEMHUB_BIN).slice(1, -1)) || /memhub(\.js)?\\?"?\s+hook\b/.test(text);
 }
 
+function memhubHookCommand(host, event) {
+  return `node ${JSON.stringify(MEMHUB_BIN)} hook ${host} --event ${event}`;
+}
+
 function addClaudeHooks(cfg) {
-  cfg = removeClaudeHooks(cfg);
+  return addHooks(cfg, CLAUDE_HOOK_EVENTS, event => ({ type: 'command', command: memhubHookCommand('claude-code', event), timeout: 10 }));
+}
+
+function codexHookHandler(event) {
+  const emitsContext = event === 'SessionStart' || event === 'UserPromptSubmit' || event === 'PostToolUse';
+  return { type: 'command', command: memhubHookCommand('codex', event), timeout: CODEX_HOOK_TIMEOUT, ...(emitsContext ? { additionalContextLimit: 0 } : {}) };
+}
+
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, sortKeys(value[key])]));
+}
+
+// Mirrors codex-rs hooks discovery `hook_hash`: the normalized group (matcher + single handler with async)
+// is key-sorted, serialized as compact JSON and hashed, so pre-trusting avoids the /hooks review prompt.
+function codexTrustedHashes(hooksPath, cfg) {
+  return CODEX_HOOK_EVENTS.map(([event, matcher]) => {
+    const label = event.replace(/(?<!^)([A-Z])/g, '_$1').toLowerCase();
+    const index = cfg.hooks[event].findIndex(isMemhubHookEntry);
+    const identity = { event_name: label, ...(matcher ? { matcher } : {}), hooks: [{ async: false, ...cfg.hooks[event][index].hooks[0] }] };
+    const hash = crypto.createHash('sha256').update(JSON.stringify(sortKeys(identity))).digest('hex');
+    return [`${hooksPath}:${label}:${index}:0`, `sha256:${hash}`];
+  });
+}
+
+function addHooks(cfg, events, handlerFor) {
+  cfg = removeMemhubHooks(cfg);
   cfg.hooks = cfg.hooks && typeof cfg.hooks === 'object' ? cfg.hooks : {};
-  for (const [event, matcher] of CLAUDE_HOOK_EVENTS) {
+  for (const [event, matcher] of events) {
     const list = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
-    list.push({
-      ...(matcher ? { matcher } : {}),
-      hooks: [{ type: 'command', command: `node ${JSON.stringify(MEMHUB_BIN)} hook claude-code --event ${event}`, timeout: 10 }],
-    });
+    list.push({ ...(matcher ? { matcher } : {}), hooks: [handlerFor(event)] });
     cfg.hooks[event] = list;
   }
   return cfg;
 }
 
-function removeClaudeHooks(cfg) {
+function removeMemhubHooks(cfg) {
   if (!cfg.hooks || typeof cfg.hooks !== 'object') return cfg;
   for (const event of Object.keys(cfg.hooks)) {
     if (!Array.isArray(cfg.hooks[event])) continue;
@@ -151,20 +188,26 @@ function removeMcpServer(cfg) {
   return cfg;
 }
 
-function stripCodexBlock(raw) {
-  return raw.replace(new RegExp(`\\n*${CODEX_START}[\\s\\S]*?${CODEX_END}\\n?`), '\n');
+function stripCodexBlock(raw, trustedKeys = []) {
+  let next = raw.replace(new RegExp(`\\n*${CODEX_START}[\\s\\S]*?${CODEX_END}\\n?`), '\n');
+  for (const key of trustedKeys) {
+    const header = `[hooks.state.${JSON.stringify(key)}]`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    next = next.replace(new RegExp(`\\n*${header}\\n(?:[^\\[\\n].*\\n?)*`, 'g'), '\n');
+  }
+  return next;
 }
 
-async function patchCodexToml(filePath, dryRun) {
+async function patchCodexToml(filePath, dryRun, trusted = []) {
   const raw = fs.existsSync(filePath) ? await fsp.readFile(filePath, 'utf8') : '';
   const block = [
     CODEX_START,
     '[mcp_servers.memhub]',
     'command = "node"',
     `args = [${JSON.stringify(MEMHUB_BIN)}, "mcp"]`,
+    ...trusted.flatMap(([key, hash]) => ['', `[hooks.state.${JSON.stringify(key)}]`, `trusted_hash = ${JSON.stringify(hash)}`]),
     CODEX_END,
   ].join('\n');
-  const base = stripCodexBlock(raw).trimEnd();
+  const base = stripCodexBlock(raw, trusted.map(([key]) => key)).trimEnd();
   const next = `${base ? `${base}\n\n` : ''}${block}\n`;
   if (dryRun) return { filePath, action: 'would-update', preview: block };
   await writeAtomic(filePath, next);
@@ -184,7 +227,16 @@ async function installForAgent(agentId, { homeDir = os.homedir(), dryRun = false
   }
 
   if (agentId === 'codex') {
-    return [await patchCodexToml(path.join(codexHome(homeDir, env), 'config.toml'), dryRun)];
+    const dir = codexHome(homeDir, env);
+    const hooksPath = path.join(dir, 'hooks.json');
+    const hooksRes = await patchJsonFile(
+      hooksPath,
+      cfg => addHooks(cfg, CODEX_HOOK_EVENTS, codexHookHandler),
+      dryRun,
+      `add ${CODEX_HOOK_EVENTS.map(([e]) => e).join(' / ')} hooks`,
+    );
+    const trusted = dryRun ? [] : codexTrustedHashes(hooksPath, await readJson(hooksPath));
+    return [hooksRes, await patchCodexToml(path.join(dir, 'config.toml'), dryRun, trusted)];
   }
 
   if (agentId === 'cursor') {
@@ -224,7 +276,7 @@ async function installForAgent(agentId, { homeDir = os.homedir(), dryRun = false
 async function uninstallFromHome(homeDir = os.homedir(), env = process.env) {
   const restored = [];
   const claudeSettings = path.join(homeDir, '.claude', 'settings.json');
-  if (await unpatchJsonFile(claudeSettings, removeClaudeHooks)) restored.push(claudeSettings);
+  if (await unpatchJsonFile(claudeSettings, removeMemhubHooks)) restored.push(claudeSettings);
   for (const mcpFile of [
     path.join(homeDir, '.claude.json'),
     path.join(homeDir, '.cursor', 'mcp.json'),
@@ -232,7 +284,13 @@ async function uninstallFromHome(homeDir = os.homedir(), env = process.env) {
   ]) {
     if (await unpatchJsonFile(mcpFile, removeMcpServer)) restored.push(mcpFile);
   }
-  const codexToml = path.join(codexHome(homeDir, env), 'config.toml');
+  const codexDir = codexHome(homeDir, env);
+  const codexHooks = path.join(codexDir, 'hooks.json');
+  if (await unpatchJsonFile(codexHooks, removeMemhubHooks)) {
+    if (!Object.keys(await readJson(codexHooks)).length) await fsp.rm(codexHooks, { force: true });
+    restored.push(codexHooks);
+  }
+  const codexToml = path.join(codexDir, 'config.toml');
   if (fs.existsSync(codexToml)) {
     const raw = await fsp.readFile(codexToml, 'utf8');
     if (raw.includes(CODEX_START)) {
